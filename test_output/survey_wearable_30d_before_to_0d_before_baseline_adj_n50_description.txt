@@ -1,0 +1,25 @@
+Dataset Description
+==================
+
+Configuration:
+- Time window: 30d_before_to_0d_before
+- Direction: backward
+- Baseline adjustment: Enabled
+- Baseline period: 30 days
+- Sample size: 50
+- Chunk size: 5
+- Parallel jobs: 2
+- Metrics: hr_average, rmssd, breath_average, hr_lowest, breath_v_average, temperature_deviation, temperature_trend_deviation, temperature_max, onset_latency, efficiency, deep, light, rem, awake, total
+- Statistics: mean, std
+
+Output files:
+- Main dataset: survey_wearable_30d_before_to_0d_before_baseline_adj_n50.csv
+- Baseline metrics: baseline_metrics_30d_n50.csv
+
+Performance summary:
+- load_start: 0.0s
+- oura_loaded: 23.0s
+- survey_loaded: 27.5s
+- oura_grouped: 57.5s
+- processing_start: 58.6s
+- processing_complete: 60.0s (50.0 participants/min)
