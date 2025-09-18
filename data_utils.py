@@ -95,7 +95,11 @@ class ProcessingConfig:
     def window_description(self) -> str:
         """Get human-readable window description."""
         start_desc = f"{abs(self.window_start_offset)}d_{'before' if self.window_start_offset < 0 else 'after'}"
-        end_desc = f"{abs(self.window_end_offset)}d_{'before' if self.window_end_offset < 0 else 'after'}"
+        # Fix: window_end_offset=0 means "up to survey date" which is "before"
+        if self.window_end_offset <= 0:
+            end_desc = f"{abs(self.window_end_offset)}d_before"
+        else:
+            end_desc = f"{abs(self.window_end_offset)}d_after"
         return f"{start_desc}_to_{end_desc}"
     
     def generate_filename(self, file_type: str) -> str:
@@ -130,14 +134,28 @@ class WearablePreprocessor:
     
     def load_data(self) -> None:
         """Load Oura and survey data."""
-        logger.info("Loading Oura parquet data...")
-        self.df_oura = pq.read_table(self.config.oura_path).to_pandas(ignore_metadata=True)
+        logger.info("Loading Oura data...")
+        
+        # Handle both parquet and CSV files
+        if self.config.oura_path.endswith('.parquet'):
+            self.df_oura = pq.read_table(self.config.oura_path).to_pandas(ignore_metadata=True)
+        else:
+            self.df_oura = pd.read_csv(self.config.oura_path)
+        
+        # CRITICAL FIX: Handle MultiIndex with pid and date
+        if 'pid' not in self.df_oura.columns:
+            # Check if pid is in the index (could be MultiIndex)
+            if hasattr(self.df_oura.index, 'names') and 'pid' in self.df_oura.index.names:
+                self.df_oura = self.df_oura.reset_index()
+            elif self.df_oura.index.name == 'pid':
+                self.df_oura = self.df_oura.reset_index()
+        
         self.df_oura["date"] = pd.to_datetime(self.df_oura["date"], utc=True)
         logger.info(f"Loaded {len(self.df_oura)} Oura records")
         
         logger.info("Loading monthly survey data...")
         self.df_survey = (
-            pd.read_csv(self.config.survey_path, index_col=0)
+            pd.read_csv(self.config.survey_path, index_col=0, low_memory=False)
             .rename(columns={"hashed_id": "pid"})
             .pipe(self._convert_dateutc)
         )
