@@ -19,6 +19,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
+# Fast skew and RMS are no longer needed - simplified to mean/std only
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -61,12 +63,50 @@ class ProcessingConfig:
         "rem", "awake", "total"
     ])
     
-    # Statistical aggregations to compute (only mean and std)
+    # Statistical aggregations to compute (simplified to mean and std only)
     stat_functions: List[str] = field(default_factory=lambda: ["mean", "std"])
     
     # Survey patterns for PROMIS scores
     depression_patterns: List[str] = field(default_factory=lambda: ["worthless", "helpless", "depressed", "hopeless"])
     anxiety_patterns: List[str] = field(default_factory=lambda: ["fearful", "anx", "worri", "uneasy"])
+    
+    # Data validation ranges (for winsorizing)
+    validation_ranges: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
+        "hr_average": (30, 200),        # Heart rate: 30-200 bpm (raw data)
+        "hr_lowest": (25, 120),         # Lowest HR: 25-120 bpm (raw data)
+        "rmssd": (0, 500),             # RMSSD: 0-500 ms (raw data)
+        "breath_average": (8, 30),      # Breathing rate: 8-30 per min
+        "breath_v_average": (8, 30),    # Breathing variability: 8-30 per min
+        "temperature_deviation": (-5, 5),    # Temperature deviation: -5 to +5°C
+        "temperature_trend_deviation": (-3, 3), # Trend deviation: -3 to +3°C
+        "temperature_max": (30, 42),    # Max temperature: 30-42°C
+        "onset_latency": (0, 180),      # Sleep onset: 0-180 minutes
+        "efficiency": (0, 100),         # Sleep efficiency: 0-100%
+        "deep": (0, 600),              # Deep sleep: 0-600 minutes
+        "light": (0, 600),             # Light sleep: 0-600 minutes
+        "rem": (0, 300),               # REM sleep: 0-300 minutes
+        "awake": (0, 300),             # Awake time: 0-300 minutes
+        "total": (120, 720),           # Total sleep: 2-12 hours
+    })
+    
+    # Validation ranges for baseline-adjusted data (deviations from personal baseline)
+    baseline_adjusted_ranges: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
+        "hr_average": (-50, 50),        # HR deviation: ±50 bpm from baseline
+        "hr_lowest": (-30, 30),         # Lowest HR deviation: ±30 bpm
+        "rmssd": (-200, 200),          # RMSSD deviation: ±200 ms
+        "breath_average": (-10, 10),    # Breathing deviation: ±10 per min
+        "breath_v_average": (-10, 10),  # Breathing variability deviation
+        "temperature_deviation": (-5, 5),    # Already deviations
+        "temperature_trend_deviation": (-3, 3), # Already deviations  
+        "temperature_max": (-10, 10),   # Max temp deviation: ±10°C
+        "onset_latency": (-120, 120),   # Sleep onset deviation: ±2 hours
+        "efficiency": (-50, 50),        # Efficiency deviation: ±50%
+        "deep": (-300, 300),           # Deep sleep deviation: ±5 hours
+        "light": (-300, 300),          # Light sleep deviation: ±5 hours
+        "rem": (-150, 150),            # REM deviation: ±2.5 hours
+        "awake": (-150, 150),          # Awake deviation: ±2.5 hours
+        "total": (-360, 360),          # Total sleep deviation: ±6 hours
+    })
     
     # Constants
     lockdown_cutoff: str = "2020-03-22"
@@ -132,6 +172,26 @@ class WearablePreprocessor:
         
         logger.info(f"Initialized WearablePreprocessor with config: {config}")
     
+    def winsorize_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply winsorizing to metrics based on validation ranges."""
+        df_clean = df.copy()
+        
+        for col in self.config.metric_cols:
+            if col in df_clean.columns and col in self.config.validation_ranges:
+                min_val, max_val = self.config.validation_ranges[col]
+                
+                # Count outliers before winsorizing
+                outliers_low = (df_clean[col] < min_val).sum()
+                outliers_high = (df_clean[col] > max_val).sum()
+                
+                if outliers_low + outliers_high > 0:
+                    logger.info(f"Winsorizing {col}: {outliers_low} low, {outliers_high} high outliers")
+                
+                # Apply winsorizing
+                df_clean[col] = df_clean[col].clip(lower=min_val, upper=max_val)
+        
+        return df_clean
+    
     def load_data(self) -> None:
         """Load Oura and survey data."""
         logger.info("Loading Oura data...")
@@ -151,7 +211,11 @@ class WearablePreprocessor:
                 self.df_oura = self.df_oura.reset_index()
         
         self.df_oura["date"] = pd.to_datetime(self.df_oura["date"], utc=True)
-        logger.info(f"Loaded {len(self.df_oura)} Oura records")
+        
+        # Apply data validation and winsorizing
+        self.df_oura = self.winsorize_data(self.df_oura)
+        
+        logger.info(f"Loaded {len(self.df_oura)} Oura records (with data validation)")
         
         logger.info("Loading monthly survey data...")
         self.df_survey = (
@@ -197,30 +261,66 @@ class WearablePreprocessor:
         return sample_pids
     
     def calculate_baseline_metrics(self, pid: str, df_oura_pid: pd.DataFrame) -> Dict[str, float]:
-        """Calculate baseline metrics for a participant."""
+        """Calculate baseline metrics for a participant using first valid 2-week window."""
         if not self.config.baseline_enabled:
             return {}
         
-        base_end = df_oura_pid["date"].iloc[0] + pd.Timedelta(days=self.config.baseline_days - 1)
-        baseline_data = df_oura_pid[df_oura_pid["date"] <= base_end][self.config.metric_cols]
+        # Try to find first valid 2-week window with sufficient data
+        min_days = 14  # Minimum 2 weeks
+        for start_day in range(0, min(60, len(df_oura_pid) - min_days), 7):  # Try every week for up to 60 days
+            start_date = df_oura_pid["date"].iloc[0] + pd.Timedelta(days=start_day)
+            end_date = start_date + pd.Timedelta(days=self.config.baseline_days - 1)
+            
+            baseline_data = df_oura_pid[
+                (df_oura_pid["date"] >= start_date) & 
+                (df_oura_pid["date"] <= end_date)
+            ][self.config.metric_cols]
+            
+            # Check if we have sufficient valid data (at least 10 days)
+            valid_days = baseline_data.dropna().shape[0]
+            if valid_days >= 10:
+                baseline_means = baseline_data.mean()
+                logger.info(f"PID {pid}: Found baseline period starting day {start_day} with {valid_days} valid days")
+                return {f"{c}_baseline_mean": baseline_means[c] for c in self.config.metric_cols}
         
-        if baseline_data.empty:
-            logger.warning(f"No baseline data for PID {pid}")
-            return {f"{c}_baseline_mean": np.nan for c in self.config.metric_cols}
+        # If no valid baseline found, use all available data
+        logger.warning(f"No valid baseline period found for PID {pid}, using all available data")
+        baseline_data = df_oura_pid[self.config.metric_cols]
+        if baseline_data.dropna().shape[0] > 0:
+            baseline_means = baseline_data.mean()
+            return {f"{c}_baseline_mean": baseline_means[c] for c in self.config.metric_cols}
         
-        baseline_means = baseline_data.mean()
-        return {f"{c}_baseline_mean": baseline_means[c] for c in self.config.metric_cols}
+        # Last resort: return NaN
+        logger.warning(f"No baseline data available for PID {pid}")
+        return {f"{c}_baseline_mean": np.nan for c in self.config.metric_cols}
     
     def apply_baseline_adjustment(self, df_oura_pid: pd.DataFrame, baseline_means: Dict[str, float]) -> pd.DataFrame:
-        """Apply baseline adjustment to Oura data."""
+        """Apply baseline adjustment to Oura data and winsorize deviations."""
         if not self.config.baseline_enabled or not baseline_means:
             return df_oura_pid.copy()
         
         df_adjusted = df_oura_pid.copy()
+        
+        # Apply baseline adjustment
         for col in self.config.metric_cols:
             baseline_key = f"{col}_baseline_mean"
             if baseline_key in baseline_means and not np.isnan(baseline_means[baseline_key]):
                 df_adjusted[col] = df_adjusted[col] - baseline_means[baseline_key]
+        
+        # Winsorize baseline-adjusted values using deviation ranges
+        for col in self.config.metric_cols:
+            if col in df_adjusted.columns and col in self.config.baseline_adjusted_ranges:
+                min_val, max_val = self.config.baseline_adjusted_ranges[col]
+                
+                # Count outliers before winsorizing
+                outliers_low = (df_adjusted[col] < min_val).sum()
+                outliers_high = (df_adjusted[col] > max_val).sum()
+                
+                if outliers_low + outliers_high > 0:
+                    logger.info(f"Winsorizing baseline-adjusted {col}: {outliers_low} low, {outliers_high} high outliers")
+                
+                # Apply winsorizing to deviations
+                df_adjusted[col] = df_adjusted[col].clip(lower=min_val, upper=max_val)
         
         return df_adjusted
     
@@ -242,11 +342,11 @@ class WearablePreprocessor:
             # Return NaN for all statistics if no data
             result = {}
             for col in self.config.metric_cols:
-                result[f"{col}_mean"] = np.nan
-                result[f"{col}_std"] = np.nan
+                for stat in self.config.stat_functions:
+                    result[f"{col}_{stat}"] = np.nan
             return result
         
-        # Compute statistics (only mean and std)
+        # Compute statistics efficiently (only mean and std)
         with np.errstate(all="ignore"):
             means = np.nanmean(arr, axis=0)
             stds = np.nanstd(arr, axis=0, ddof=1)
@@ -254,8 +354,10 @@ class WearablePreprocessor:
         # Format results
         result = {}
         for j, col in enumerate(self.config.metric_cols):
-            result[f"{col}_mean"] = means[j]
-            result[f"{col}_std"] = stds[j]
+            if "mean" in self.config.stat_functions:
+                result[f"{col}_mean"] = means[j]
+            if "std" in self.config.stat_functions:
+                result[f"{col}_std"] = stds[j]
         
         return result
     
@@ -412,6 +514,11 @@ class WearablePreprocessor:
             f.write(f"- promis_anx_sum: PROMIS anxiety sum score\n")
             f.write(f"- after_lockdown: Binary indicator for post-lockdown surveys\n")
             f.write(f"- [metric]_[stat]: Statistical aggregations of wearable metrics\n")
+            
+            # Add data validation info
+            f.write(f"\nData validation ranges applied:\n")
+            for metric, (min_val, max_val) in self.config.validation_ranges.items():
+                f.write(f"- {metric}: {min_val} to {max_val}\n")
         
         logger.info(f"Saved description to {desc_file}")
 

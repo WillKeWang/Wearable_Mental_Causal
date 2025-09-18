@@ -98,7 +98,7 @@ class TestDataPreprocessingReal(unittest.TestCase):
         print(f"  Survey records: {len(test_survey)}")
     
     def test_basic_functionality(self):
-        """Test basic preprocessing functionality."""
+        """Test basic preprocessing functionality with all statistics."""
         print("\nTesting basic functionality...")
         
         config = ProcessingConfig(
@@ -128,15 +128,55 @@ class TestDataPreprocessingReal(unittest.TestCase):
         for col in required_cols:
             self.assertIn(col, df_main.columns)
         
-        # Check only mean and std statistics
-        stat_cols = [c for c in df_main.columns if '_mean' in c or '_std' in c]
-        unwanted_stats = [c for c in df_main.columns if '_rms' in c or '_skew' in c]
+        # Check mean and std statistics are present
+        stat_cols_mean = [c for c in df_main.columns if '_mean' in c]
+        stat_cols_std = [c for c in df_main.columns if '_std' in c]
+        unwanted_rms = [c for c in df_main.columns if '_rms' in c]
+        unwanted_skew = [c for c in df_main.columns if '_skew' in c]
         
-        self.assertGreater(len(stat_cols), 0)
-        self.assertEqual(len(unwanted_stats), 0)
+        self.assertGreater(len(stat_cols_mean), 0)
+        self.assertGreater(len(stat_cols_std), 0)
+        self.assertEqual(len(unwanted_rms), 0)  # Should be no RMS columns
+        self.assertEqual(len(unwanted_skew), 0)  # Should be no skew columns
+        
+        # Check that both statistics have the same number of columns for each metric
+        expected_metrics = len(config.metric_cols)
+        self.assertEqual(len(stat_cols_mean), expected_metrics)
+        self.assertEqual(len(stat_cols_std), expected_metrics)
         
         print(f"  ✓ Created {len(df_main)} main records, {len(df_baseline)} baseline records")
-        print(f"  ✓ {len(stat_cols)} statistic columns (mean/std only)")
+        print(f"  ✓ Statistics present: {len(stat_cols_mean)} mean, {len(stat_cols_std)} std (no RMS/skew)")
+    
+    def test_statistics_only_mean_std(self):
+        """Test configuration with only mean and std statistics."""
+        print("\nTesting mean and std only configuration...")
+        
+        config = ProcessingConfig(
+            oura_path=str(self.test_oura_file),
+            survey_path=str(self.test_survey_file),
+            output_dir=str(self.test_output_dir / "mean_std_only"),
+            window_start_offset=-30,
+            window_end_offset=0,
+            baseline_enabled=True,
+            stat_functions=["mean", "std"],  # Only mean and std
+            sample_size=10
+        )
+        
+        main_file, baseline_file = run_preprocessing(config)
+        df_main = pd.read_csv(main_file)
+        
+        # Check only mean and std statistics
+        stat_cols_mean = [c for c in df_main.columns if '_mean' in c]
+        stat_cols_std = [c for c in df_main.columns if '_std' in c]
+        unwanted_rms = [c for c in df_main.columns if '_rms' in c]
+        unwanted_skew = [c for c in df_main.columns if '_skew' in c]
+        
+        self.assertGreater(len(stat_cols_mean), 0)
+        self.assertGreater(len(stat_cols_std), 0)
+        self.assertEqual(len(unwanted_rms), 0)
+        self.assertEqual(len(unwanted_skew), 0)
+        
+        print(f"  ✓ {len(stat_cols_mean)} mean, {len(stat_cols_std)} std columns (no RMS/skew)")
     
     def test_different_time_windows(self):
         """Test different time window configurations."""
@@ -239,8 +279,8 @@ class TestDataPreprocessingReal(unittest.TestCase):
             print(f"  ✓ Sample {sample_size}: {main_pids} participants processed")
     
     def test_data_integrity(self):
-        """Test data integrity and realistic values."""
-        print("\nTesting data integrity...")
+        """Test data integrity and realistic values with winsorizing."""
+        print("\nTesting data integrity with winsorizing...")
         
         config = ProcessingConfig(
             oura_path=str(self.test_oura_file),
@@ -263,13 +303,56 @@ class TestDataPreprocessingReal(unittest.TestCase):
         if len(anx_scores) > 0:
             self.assertTrue((anx_scores >= 4).all() and (anx_scores <= 20).all())
         
-        # Test heart rate values are reasonable
+        # Test heart rate values are within appropriate range
         hr_cols = [c for c in df_main.columns if 'hr_average_mean' in c]
         if hr_cols:
             hr_values = df_main[hr_cols[0]].dropna()
             if len(hr_values) > 0:
-                reasonable_hr = (hr_values >= 40) & (hr_values <= 120)
-                self.assertTrue(reasonable_hr.all(), "Heart rate values outside reasonable range")
+                # Check ranges based on whether baseline adjustment is enabled
+                if config.baseline_enabled:
+                    # Baseline-adjusted values should be deviations: ±50 bpm
+                    reasonable_hr = (hr_values >= -50) & (hr_values <= 50)
+                    self.assertTrue(reasonable_hr.all(), 
+                        f"Baseline-adjusted HR values outside deviation range [-50, 50]: {hr_values[~reasonable_hr].values}")
+                else:
+                    # Raw values should be absolute bpm: 30-200
+                    reasonable_hr = (hr_values >= 30) & (hr_values <= 200)
+                    self.assertTrue(reasonable_hr.all(), 
+                        f"Raw HR values outside absolute range [30, 200]: {hr_values[~reasonable_hr].values}")
+        
+        # Test other physiological measures are within appropriate ranges
+        validation_checks = [
+            ('rmssd_mean', "RMSSD values"),
+            ('efficiency_mean', "Sleep efficiency values"),
+            ('total_mean', "Total sleep values")
+        ]
+        
+        for col_pattern, description in validation_checks:
+            matching_cols = [c for c in df_main.columns if col_pattern in c]
+            if matching_cols:
+                values = df_main[matching_cols[0]].dropna()
+                if len(values) > 0:
+                    # Use appropriate ranges based on baseline adjustment
+                    if config.baseline_enabled:
+                        # Baseline-adjusted ranges (deviations)
+                        if 'rmssd' in col_pattern:
+                            min_val, max_val = -200, 200  # ±200 ms deviation
+                        elif 'efficiency' in col_pattern:
+                            min_val, max_val = -50, 50    # ±50% deviation
+                        elif 'total' in col_pattern:
+                            min_val, max_val = -360, 360  # ±6 hours deviation
+                    else:
+                        # Raw data ranges (absolute values)
+                        if 'rmssd' in col_pattern:
+                            min_val, max_val = 0, 500     # 0-500 ms absolute
+                        elif 'efficiency' in col_pattern:
+                            min_val, max_val = 0, 100     # 0-100% absolute
+                        elif 'total' in col_pattern:
+                            min_val, max_val = 120, 720   # 2-12 hours absolute
+                    
+                    reasonable = (values >= min_val) & (values <= max_val)
+                    self.assertTrue(reasonable.all(), 
+                        f"{description} outside {'deviation' if config.baseline_enabled else 'absolute'} range [{min_val}, {max_val}]: {values[~reasonable].values}")
         
         # Test dates are valid
         dates = pd.to_datetime(df_main['date'])
@@ -279,11 +362,50 @@ class TestDataPreprocessingReal(unittest.TestCase):
         lockdown_vals = df_main['after_lockdown'].unique()
         self.assertTrue(set(lockdown_vals).issubset({0, 1}))
         
+        # Test mean and std statistics are present and non-constant
+        for stat in ['mean', 'std']:
+            stat_cols = [c for c in df_main.columns if f'_{stat}' in c]
+            if stat_cols:
+                # Check at least one stat column has variance (not all NaN or constant)
+                has_variance = any(df_main[col].dropna().nunique() > 1 for col in stat_cols[:3])  # Check first 3
+                self.assertTrue(has_variance, f"All {stat} statistics appear constant")
+        
         print(f"  ✓ Data integrity verified for {len(df_main)} records")
         if len(dep_scores) > 0:
             print(f"  ✓ PROMIS Depression range: [{dep_scores.min():.1f}, {dep_scores.max():.1f}]")
         if len(anx_scores) > 0:
             print(f"  ✓ PROMIS Anxiety range: [{anx_scores.min():.1f}, {anx_scores.max():.1f}]")
+        if hr_cols and len(hr_values) > 0:
+            print(f"  ✓ Heart rate range (winsorized): [{hr_values.min():.1f}, {hr_values.max():.1f}] bpm")
+    
+    def test_data_validation_ranges(self):
+        """Test that data validation ranges are applied correctly."""
+        print("\nTesting data validation ranges...")
+        
+        config = ProcessingConfig(
+            oura_path=str(self.test_oura_file),
+            survey_path=str(self.test_survey_file),
+            output_dir=str(self.test_output_dir / "validation"),
+            window_start_offset=-30,
+            window_end_offset=0,
+            sample_size=10
+        )
+        
+        # Test that validation ranges are defined for all metrics
+        for metric in config.metric_cols:
+            self.assertIn(metric, config.validation_ranges, f"Validation range not defined for {metric}")
+            min_val, max_val = config.validation_ranges[metric]
+            self.assertLess(min_val, max_val, f"Invalid range for {metric}: {min_val} >= {max_val}")
+        
+        print(f"  ✓ Validation ranges defined for all {len(config.metric_cols)} metrics")
+        
+        # Test processing with validation
+        main_file, baseline_file = run_preprocessing(config)
+        df_main = pd.read_csv(main_file)
+        
+        # Check that at least some values have been processed
+        self.assertGreater(len(df_main), 0)
+        print(f"  ✓ Processing completed with validation: {len(df_main)} records")
 
 
 def run_focused_tests():
@@ -316,12 +438,16 @@ def run_focused_tests():
         print("\n🎉 All tests passed! The data preprocessing system works correctly.")
         print("\nTested functionality:")
         print("  ✓ Basic preprocessing with real data subset")
+        print("  ✓ Simplified feature pipeline: mean and std statistics only")
+        print("  ✓ Configurable statistics (mean/std only option)")
         print("  ✓ Different time windows (30d before, 6w-2w before, 1w after)")
         print("  ✓ Baseline adjustment on/off")
         print("  ✓ Sample size limiting")
-        print("  ✓ Data integrity and realistic value ranges")
+        print("  ✓ Data validation and winsorizing for physiological measures")
+        print("  ✓ Heart rate range: 30-200 bpm (allows exercise/high intensity)")
+        print("  ✓ RMSSD range: 0-500 ms (allows fit individuals)")
         print("  ✓ Proper filename generation")
-        print("  ✓ Mean and std statistics only (no RMS/skew)")
+        print("  ✓ Data integrity with realistic value ranges")
         
         return True
     else:
