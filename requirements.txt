@@ -3,3 +3,5 @@ numpy
 pyarrow 
 scipy 
 tqdm
+scikit-learn
+causal-learn
