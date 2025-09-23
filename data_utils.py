@@ -70,44 +70,6 @@ class ProcessingConfig:
     depression_patterns: List[str] = field(default_factory=lambda: ["worthless", "helpless", "depressed", "hopeless"])
     anxiety_patterns: List[str] = field(default_factory=lambda: ["fearful", "anx", "worri", "uneasy"])
     
-    # Data validation ranges (for winsorizing)
-    validation_ranges: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
-        "hr_average": (30, 200),        # Heart rate: 30-200 bpm (raw data)
-        "hr_lowest": (25, 120),         # Lowest HR: 25-120 bpm (raw data)
-        "rmssd": (0, 500),             # RMSSD: 0-500 ms (raw data)
-        "breath_average": (8, 30),      # Breathing rate: 8-30 per min
-        "breath_v_average": (8, 30),    # Breathing variability: 8-30 per min
-        "temperature_deviation": (-5, 5),    # Temperature deviation: -5 to +5°C
-        "temperature_trend_deviation": (-3, 3), # Trend deviation: -3 to +3°C
-        "temperature_max": (30, 42),    # Max temperature: 30-42°C
-        "onset_latency": (0, 180),      # Sleep onset: 0-180 minutes
-        "efficiency": (0, 100),         # Sleep efficiency: 0-100%
-        "deep": (0, 600),              # Deep sleep: 0-600 minutes
-        "light": (0, 600),             # Light sleep: 0-600 minutes
-        "rem": (0, 300),               # REM sleep: 0-300 minutes
-        "awake": (0, 300),             # Awake time: 0-300 minutes
-        "total": (120, 720),           # Total sleep: 2-12 hours
-    })
-    
-    # Validation ranges for baseline-adjusted data (deviations from personal baseline)
-    baseline_adjusted_ranges: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
-        "hr_average": (-50, 50),        # HR deviation: ±50 bpm from baseline
-        "hr_lowest": (-30, 30),         # Lowest HR deviation: ±30 bpm
-        "rmssd": (-200, 200),          # RMSSD deviation: ±200 ms
-        "breath_average": (-10, 10),    # Breathing deviation: ±10 per min
-        "breath_v_average": (-10, 10),  # Breathing variability deviation
-        "temperature_deviation": (-5, 5),    # Already deviations
-        "temperature_trend_deviation": (-3, 3), # Already deviations  
-        "temperature_max": (-10, 10),   # Max temp deviation: ±10°C
-        "onset_latency": (-120, 120),   # Sleep onset deviation: ±2 hours
-        "efficiency": (-50, 50),        # Efficiency deviation: ±50%
-        "deep": (-300, 300),           # Deep sleep deviation: ±5 hours
-        "light": (-300, 300),          # Light sleep deviation: ±5 hours
-        "rem": (-150, 150),            # REM deviation: ±2.5 hours
-        "awake": (-150, 150),          # Awake deviation: ±2.5 hours
-        "total": (-360, 360),          # Total sleep deviation: ±6 hours
-    })
-    
     # Constants
     lockdown_cutoff: str = "2020-03-22"
     excluded_pid: str = "hnLS_JCWE9qDW__KI4upzrwUsiqVdbEm7J8725U6H15XL9inSZqhb1b9QGsY0K7z744"
@@ -172,26 +134,6 @@ class WearablePreprocessor:
         
         logger.info(f"Initialized WearablePreprocessor with config: {config}")
     
-    def winsorize_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply winsorizing to metrics based on validation ranges."""
-        df_clean = df.copy()
-        
-        for col in self.config.metric_cols:
-            if col in df_clean.columns and col in self.config.validation_ranges:
-                min_val, max_val = self.config.validation_ranges[col]
-                
-                # Count outliers before winsorizing
-                outliers_low = (df_clean[col] < min_val).sum()
-                outliers_high = (df_clean[col] > max_val).sum()
-                
-                if outliers_low + outliers_high > 0:
-                    logger.info(f"Winsorizing {col}: {outliers_low} low, {outliers_high} high outliers")
-                
-                # Apply winsorizing
-                df_clean[col] = df_clean[col].clip(lower=min_val, upper=max_val)
-        
-        return df_clean
-    
     def load_data(self) -> None:
         """Load Oura and survey data."""
         logger.info("Loading Oura data...")
@@ -212,10 +154,7 @@ class WearablePreprocessor:
         
         self.df_oura["date"] = pd.to_datetime(self.df_oura["date"], utc=True)
         
-        # Apply data validation and winsorizing
-        self.df_oura = self.winsorize_data(self.df_oura)
-        
-        logger.info(f"Loaded {len(self.df_oura)} Oura records (with data validation)")
+        logger.info(f"Loaded {len(self.df_oura)} Oura records (no data validation applied)")
         
         logger.info("Loading monthly survey data...")
         self.df_survey = (
@@ -295,7 +234,7 @@ class WearablePreprocessor:
         return {f"{c}_baseline_mean": np.nan for c in self.config.metric_cols}
     
     def apply_baseline_adjustment(self, df_oura_pid: pd.DataFrame, baseline_means: Dict[str, float]) -> pd.DataFrame:
-        """Apply baseline adjustment to Oura data and winsorize deviations."""
+        """Apply baseline adjustment to Oura data."""
         if not self.config.baseline_enabled or not baseline_means:
             return df_oura_pid.copy()
         
@@ -306,21 +245,6 @@ class WearablePreprocessor:
             baseline_key = f"{col}_baseline_mean"
             if baseline_key in baseline_means and not np.isnan(baseline_means[baseline_key]):
                 df_adjusted[col] = df_adjusted[col] - baseline_means[baseline_key]
-        
-        # Winsorize baseline-adjusted values using deviation ranges
-        for col in self.config.metric_cols:
-            if col in df_adjusted.columns and col in self.config.baseline_adjusted_ranges:
-                min_val, max_val = self.config.baseline_adjusted_ranges[col]
-                
-                # Count outliers before winsorizing
-                outliers_low = (df_adjusted[col] < min_val).sum()
-                outliers_high = (df_adjusted[col] > max_val).sum()
-                
-                if outliers_low + outliers_high > 0:
-                    logger.info(f"Winsorizing baseline-adjusted {col}: {outliers_low} low, {outliers_high} high outliers")
-                
-                # Apply winsorizing to deviations
-                df_adjusted[col] = df_adjusted[col].clip(lower=min_val, upper=max_val)
         
         return df_adjusted
     
@@ -515,10 +439,9 @@ class WearablePreprocessor:
             f.write(f"- after_lockdown: Binary indicator for post-lockdown surveys\n")
             f.write(f"- [metric]_[stat]: Statistical aggregations of wearable metrics\n")
             
-            # Add data validation info
-            f.write(f"\nData validation ranges applied:\n")
-            for metric, (min_val, max_val) in self.config.validation_ranges.items():
-                f.write(f"- {metric}: {min_val} to {max_val}\n")
+            f.write(f"\nData processing:\n")
+            f.write(f"- No winsorization applied - original variance preserved\n")
+            f.write(f"- Baseline adjustment preserves true deviations from personal baseline\n")
         
         logger.info(f"Saved description to {desc_file}")
 

@@ -279,8 +279,8 @@ class TestDataPreprocessingReal(unittest.TestCase):
             print(f"  ✓ Sample {sample_size}: {main_pids} participants processed")
     
     def test_data_integrity(self):
-        """Test data integrity and realistic values with winsorizing."""
-        print("\nTesting data integrity with winsorizing...")
+        """Test data integrity and realistic values without winsorization."""
+        print("\nTesting data integrity without winsorization...")
         
         config = ProcessingConfig(
             oura_path=str(self.test_oura_file),
@@ -303,24 +303,16 @@ class TestDataPreprocessingReal(unittest.TestCase):
         if len(anx_scores) > 0:
             self.assertTrue((anx_scores >= 4).all() and (anx_scores <= 20).all())
         
-        # Test heart rate values are within appropriate range
+        # Test that we have physiological data (no winsorization means wider ranges expected)
         hr_cols = [c for c in df_main.columns if 'hr_average_mean' in c]
         if hr_cols:
             hr_values = df_main[hr_cols[0]].dropna()
             if len(hr_values) > 0:
-                # Check ranges based on whether baseline adjustment is enabled
-                if config.baseline_enabled:
-                    # Baseline-adjusted values should be deviations: ±50 bpm
-                    reasonable_hr = (hr_values >= -50) & (hr_values <= 50)
-                    self.assertTrue(reasonable_hr.all(), 
-                        f"Baseline-adjusted HR values outside deviation range [-50, 50]: {hr_values[~reasonable_hr].values}")
-                else:
-                    # Raw values should be absolute bpm: 30-200
-                    reasonable_hr = (hr_values >= 30) & (hr_values <= 200)
-                    self.assertTrue(reasonable_hr.all(), 
-                        f"Raw HR values outside absolute range [30, 200]: {hr_values[~reasonable_hr].values}")
+                # Just check that we have numeric values - no range restrictions
+                self.assertTrue(hr_values.apply(np.isfinite).all(), "Heart rate values should be finite numbers")
+                print(f"  ✓ Heart rate range (unwinsorized): [{hr_values.min():.1f}, {hr_values.max():.1f}]")
         
-        # Test other physiological measures are within appropriate ranges
+        # Test other physiological measures are numeric and finite
         validation_checks = [
             ('rmssd_mean', "RMSSD values"),
             ('efficiency_mean', "Sleep efficiency values"),
@@ -332,27 +324,10 @@ class TestDataPreprocessingReal(unittest.TestCase):
             if matching_cols:
                 values = df_main[matching_cols[0]].dropna()
                 if len(values) > 0:
-                    # Use appropriate ranges based on baseline adjustment
-                    if config.baseline_enabled:
-                        # Baseline-adjusted ranges (deviations)
-                        if 'rmssd' in col_pattern:
-                            min_val, max_val = -200, 200  # ±200 ms deviation
-                        elif 'efficiency' in col_pattern:
-                            min_val, max_val = -50, 50    # ±50% deviation
-                        elif 'total' in col_pattern:
-                            min_val, max_val = -360, 360  # ±6 hours deviation
-                    else:
-                        # Raw data ranges (absolute values)
-                        if 'rmssd' in col_pattern:
-                            min_val, max_val = 0, 500     # 0-500 ms absolute
-                        elif 'efficiency' in col_pattern:
-                            min_val, max_val = 0, 100     # 0-100% absolute
-                        elif 'total' in col_pattern:
-                            min_val, max_val = 120, 720   # 2-12 hours absolute
-                    
-                    reasonable = (values >= min_val) & (values <= max_val)
-                    self.assertTrue(reasonable.all(), 
-                        f"{description} outside {'deviation' if config.baseline_enabled else 'absolute'} range [{min_val}, {max_val}]: {values[~reasonable].values}")
+                    # Check values are finite numbers (no winsorization range checks)
+                    self.assertTrue(values.apply(np.isfinite).all(), 
+                        f"{description} should be finite numbers")
+                    print(f"  ✓ {description} range: [{values.min():.1f}, {values.max():.1f}]")
         
         # Test dates are valid
         dates = pd.to_datetime(df_main['date'])
@@ -370,42 +345,60 @@ class TestDataPreprocessingReal(unittest.TestCase):
                 has_variance = any(df_main[col].dropna().nunique() > 1 for col in stat_cols[:3])  # Check first 3
                 self.assertTrue(has_variance, f"All {stat} statistics appear constant")
         
-        print(f"  ✓ Data integrity verified for {len(df_main)} records")
+        print(f"  ✓ Data integrity verified for {len(df_main)} records (no winsorization)")
         if len(dep_scores) > 0:
             print(f"  ✓ PROMIS Depression range: [{dep_scores.min():.1f}, {dep_scores.max():.1f}]")
         if len(anx_scores) > 0:
             print(f"  ✓ PROMIS Anxiety range: [{anx_scores.min():.1f}, {anx_scores.max():.1f}]")
-        if hr_cols and len(hr_values) > 0:
-            print(f"  ✓ Heart rate range (winsorized): [{hr_values.min():.1f}, {hr_values.max():.1f}] bpm")
     
-    def test_data_validation_ranges(self):
-        """Test that data validation ranges are applied correctly."""
-        print("\nTesting data validation ranges...")
+    def test_no_winsorization_preserved_variance(self):
+        """Test that removing winsorization preserves original variance structure."""
+        print("\nTesting preserved variance without winsorization...")
         
         config = ProcessingConfig(
             oura_path=str(self.test_oura_file),
             survey_path=str(self.test_survey_file),
-            output_dir=str(self.test_output_dir / "validation"),
+            output_dir=str(self.test_output_dir / "no_winsorization"),
             window_start_offset=-30,
             window_end_offset=0,
-            sample_size=10
+            baseline_enabled=True,
+            sample_size=15
         )
         
-        # Test that validation ranges are defined for all metrics
-        for metric in config.metric_cols:
-            self.assertIn(metric, config.validation_ranges, f"Validation range not defined for {metric}")
-            min_val, max_val = config.validation_ranges[metric]
-            self.assertLess(min_val, max_val, f"Invalid range for {metric}: {min_val} >= {max_val}")
-        
-        print(f"  ✓ Validation ranges defined for all {len(config.metric_cols)} metrics")
-        
-        # Test processing with validation
         main_file, baseline_file = run_preprocessing(config)
         df_main = pd.read_csv(main_file)
         
-        # Check that at least some values have been processed
-        self.assertGreater(len(df_main), 0)
-        print(f"  ✓ Processing completed with validation: {len(df_main)} records")
+        # Test that we can have extreme values that would have been winsorized
+        hr_cols = [c for c in df_main.columns if 'hr_average_mean' in c]
+        if hr_cols:
+            hr_values = df_main[hr_cols[0]].dropna()
+            if len(hr_values) > 0:
+                # With baseline adjustment, we should be able to see large deviations
+                if config.baseline_enabled:
+                    # Check we can have deviations larger than old winsorization limits (±50)
+                    large_deviations = (abs(hr_values) > 50).sum()
+                    print(f"  ✓ Found {large_deviations} HR deviations >50 bpm (would have been winsorized)")
+                
+                # Check for reasonable variance
+                hr_std = hr_values.std()
+                self.assertGreater(hr_std, 0, "Heart rate should have non-zero variance")
+                print(f"  ✓ HR variance preserved: std = {hr_std:.2f}")
+        
+        # Test RMSSD can have extreme values
+        rmssd_cols = [c for c in df_main.columns if 'rmssd_mean' in c]
+        if rmssd_cols:
+            rmssd_values = df_main[rmssd_cols[0]].dropna()
+            if len(rmssd_values) > 0:
+                if config.baseline_enabled:
+                    # Check for large deviations that would have been capped at ±200
+                    large_rmssd_deviations = (abs(rmssd_values) > 200).sum()
+                    print(f"  ✓ Found {large_rmssd_deviations} RMSSD deviations >200ms (would have been winsorized)")
+                
+                rmssd_std = rmssd_values.std()
+                self.assertGreater(rmssd_std, 0, "RMSSD should have non-zero variance")
+                print(f"  ✓ RMSSD variance preserved: std = {rmssd_std:.2f}")
+        
+        print(f"  ✓ Original variance structure preserved without artificial constraints")
 
 
 def run_focused_tests():
@@ -443,11 +436,11 @@ def run_focused_tests():
         print("  ✓ Different time windows (30d before, 6w-2w before, 1w after)")
         print("  ✓ Baseline adjustment on/off")
         print("  ✓ Sample size limiting")
-        print("  ✓ Data validation and winsorizing for physiological measures")
-        print("  ✓ Heart rate range: 30-200 bpm (allows exercise/high intensity)")
-        print("  ✓ RMSSD range: 0-500 ms (allows fit individuals)")
+        print("  ✓ NO winsorization - original variance structure preserved")
+        print("  ✓ Physiological measures maintain natural distributions")
+        print("  ✓ Baseline deviations show true magnitude of changes")
         print("  ✓ Proper filename generation")
-        print("  ✓ Data integrity with realistic value ranges")
+        print("  ✓ Data integrity without artificial constraints")
         
         return True
     else:
