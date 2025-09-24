@@ -302,7 +302,7 @@ def main():
     data_overview = get_data_overview(oura_path, survey_path)
     
     # Create output directory
-    output_base = Path("data/processed/full_run")
+    output_base = Path("data/preprocessed/full_run")
     output_base.mkdir(parents=True, exist_ok=True)
     
     # Define configurations for the two time windows
@@ -391,7 +391,7 @@ def main():
         total_processing_time = sum(r['wall_time'] for r in results if r['success'])
         avg_records_per_second = total_records / total_processing_time if total_processing_time > 0 else 0
         
-        print(f"  Total records processed: {total_records:,}")
+        print(f"  Total records preprocessed: {total_records:,}")
         print(f"  Total processing time: {format_duration(total_processing_time)}")
         print(f"  Average processing rate: {avg_records_per_second:,.0f} records/second")
         
