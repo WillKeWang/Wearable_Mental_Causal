@@ -1,708 +1,535 @@
 """
-Modular causal discovery utilities for wearable data analysis.
-
-This module provides configurable causal discovery analysis including:
-- Data splitting for discovery/validation
-- Background knowledge constraints
-- PC algorithm with domain knowledge
-- Bootstrap stability analysis
-- Graph visualization and export
+Modular Causal Discovery Functions
+=================================
+Clean, reusable functions for temporal causal discovery analysis.
 """
-
-import os
-import io
-import random
-import warnings
-import logging
-import unittest
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any, Set
-from pathlib import Path
-from collections import defaultdict
-from contextlib import redirect_stdout, redirect_stderr
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
+import random
+import warnings
+from collections import defaultdict
 from tqdm import tqdm
-from sklearn.preprocessing import StandardScaler
+from contextlib import redirect_stdout, redirect_stderr
+from typing import Dict, List, Tuple, Optional, Any
+from pathlib import Path
+import os
 
-# Causal discovery imports
 from causallearn.search.ConstraintBased.PC import pc
-from causallearn.utils.GraphUtils import GraphUtils
 from causallearn.utils.cit import fisherz
-from causallearn.search.ScoreBased.GES import ges
-from causallearn.graph.GraphClass import CausalGraph
-from causallearn.graph.Node import Node
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.graph.GraphNode import GraphNode
-from causallearn.utils.PCUtils.BackgroundKnowledgeOrientUtils import orient_by_background_knowledge
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Suppress warnings
 warnings.filterwarnings('ignore')
 
 
-@dataclass
-class CausalDiscoveryConfig:
-    """Configuration for causal discovery analysis."""
+class DataProcessor:
+    """Handle data loading and preparation."""
     
-    # Data configuration
-    outcome_vars: List[str] = field(default_factory=lambda: ["promis_dep_sum", "promis_anx_sum"])
-    metric_patterns: List[str] = field(default_factory=lambda: ["_mean", "_std"])
-    exclude_patterns: List[str] = field(default_factory=lambda: ["total_"])
-    
-    # Data splitting
-    discovery_split: float = 0.5  # Fraction for discovery set
-    validation_split: float = 0.5  # Fraction for validation set
-    split_seed: int = 42
-    max_samples: Optional[int] = None  # Limit total samples (None = all)
-    
-    # PC algorithm parameters
-    alpha: float = 0.05
-    independence_test: str = "fisherz"  # fisherz, kci, etc.
-    stable: bool = True
-    uc_rule: int = 0
-    verbose: bool = False
-    
-    # Background knowledge
-    forbid_sensor_correlations: bool = True  # Forbid mean ↔ std of same sensor
-    require_sensor_to_outcome: bool = True   # Require sensor → outcome direction
-    
-    # Bootstrap analysis
-    n_bootstrap: int = 100
-    bootstrap_sample_frac: float = 0.6
-    stability_thresholds: Dict[str, float] = field(default_factory=lambda: {
-        "strong": 0.7,
-        "moderate": 0.5,
-        "weak": 0.3
-    })
-    
-    # Key edges to track
-    key_edges: List[Tuple[str, str]] = field(default_factory=lambda: [
-        ("rem_std", "promis_dep_sum"),
-        ("deep_std", "promis_dep_sum"),
-        ("promis_anx_sum", "promis_dep_sum")
-    ])
-    
-    # Output configuration
-    output_dir: str = "results/causal_discovery"
-    save_graphs: bool = True
-    graph_format: str = "png"
-    save_bootstrap_results: bool = True
-    
-    # Visualization
-    figure_size: Tuple[int, int] = (12, 10)
-    show_graphs: bool = True
-    
-    def __post_init__(self):
-        """Validate configuration parameters."""
-        if not 0 < self.discovery_split < 1:
-            raise ValueError("discovery_split must be between 0 and 1")
-        if not 0 < self.alpha < 1:
-            raise ValueError("alpha must be between 0 and 1")
-        if not 0 < self.bootstrap_sample_frac <= 1:
-            raise ValueError("bootstrap_sample_frac must be between 0 and 1")
-        if self.n_bootstrap <= 0:
-            raise ValueError("n_bootstrap must be positive")
-    
-    def generate_filename(self, file_type: str, additional_info: str = "") -> str:
-        """Generate descriptive filename based on configuration."""
-        base_name = f"causal_discovery_alpha{self.alpha}_bs{self.n_bootstrap}"
-        if additional_info:
-            base_name += f"_{additional_info}"
+    @staticmethod
+    def load_dataset(filepath: str, dataset_name: str) -> Optional[pd.DataFrame]:
+        """Load dataset with automatic format detection."""
+        print(f"\nLoading {dataset_name}: {filepath}")
         
-        if file_type == "bootstrap_results":
-            return f"{base_name}_bootstrap_stability.csv"
-        elif file_type == "pc_graph":
-            return f"{base_name}_pc_graph.{self.graph_format}"
-        elif file_type == "edge_summary":
-            return f"{base_name}_edge_summary.csv"
-        elif file_type == "data_summary":
-            return f"{base_name}_data_summary.txt"
+        # Try different file extensions
+        for ext in ['', '.csv', '.txt']:
+            try_path = filepath + ext if not filepath.endswith(('.csv', '.txt')) else filepath
+            if os.path.exists(try_path):
+                try:
+                    df = pd.read_csv(try_path)
+                    break
+                except:
+                    # Try tab-separated
+                    df = pd.read_csv(try_path, sep='\t')
+                    break
         else:
-            raise ValueError(f"Unknown file_type: {file_type}")
-
-
-class CausalDiscoveryAnalyzer:
-    """Main class for causal discovery analysis."""
+            print(f"ERROR: File not found: {filepath}")
+            return None
+        
+        print(f"Loaded: {df.shape[0]} rows × {df.shape[1]} columns")
+        if 'pid' in df.columns:
+            print(f"Unique participants: {df['pid'].nunique()}")
+        
+        return df
     
-    def __init__(self, config: CausalDiscoveryConfig):
-        """Initialize analyzer with configuration."""
-        self.config = config
-        self.output_dir = Path(config.output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    @staticmethod
+    def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+        """Apply standard cleaning filters (same as original notebook)."""
+        print(f"Original shape: {df.shape}")
         
-        # Initialize data containers
-        self.df_discovery = None
-        self.df_validation = None
-        self.feature_names = []
-        self.X_discovery = None
-        self.X_validation = None
+        # Drop missing values
+        cleaned_df = df.dropna(axis=0, how='any')
+        print(f"After dropping NAs: {cleaned_df.shape}")
         
-        logger.info(f"Initialized CausalDiscoveryAnalyzer with config: {config}")
+        # Filter depression and anxiety scores (same ranges as notebook)
+        if 'promis_dep_sum' in cleaned_df.columns:
+            cleaned_df = cleaned_df[
+                (cleaned_df['promis_dep_sum'] >= 4) & 
+                (cleaned_df['promis_dep_sum'] <= 20)
+            ]
+            print(f"After depression filtering: {cleaned_df.shape}")
+        
+        if 'promis_anx_sum' in cleaned_df.columns:
+            cleaned_df = cleaned_df[
+                (cleaned_df['promis_anx_sum'] >= 4) & 
+                (cleaned_df['promis_anx_sum'] <= 20)
+            ]
+            print(f"After anxiety filtering: {cleaned_df.shape}")
+        
+        if 'pid' in cleaned_df.columns:
+            print(f"Final participants: {cleaned_df['pid'].nunique()}")
+        
+        return cleaned_df
     
-    def prepare_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Split data into discovery and validation sets."""
-        logger.info("Preparing data for causal discovery...")
+    @staticmethod
+    def prepare_variables(df: pd.DataFrame, 
+                         base_vars: List[str] = None,
+                         exclude_patterns: List[str] = None) -> Tuple[List[str], np.ndarray]:
+        """Prepare variable list and data matrix."""
+        if base_vars is None:
+            base_vars = ["promis_dep_sum", "promis_anx_sum"]
+        if exclude_patterns is None:
+            exclude_patterns = ["total_"]
         
-        # Get feature columns
-        metric_cols = []
-        for pattern in self.config.metric_patterns:
-            metric_cols.extend([c for c in df.columns if c.endswith(pattern)])
+        # Get sensor metrics
+        metric_cols = [c for c in df.columns if c.endswith("_mean") or c.endswith("_std")]
+        
+        # Combine variables
+        cols = base_vars + metric_cols
         
         # Remove excluded patterns
-        for exclude_pattern in self.config.exclude_patterns:
-            metric_cols = [c for c in metric_cols if not c.startswith(exclude_pattern)]
+        for pattern in exclude_patterns:
+            cols = [c for c in cols if not c.startswith(pattern)]
         
-        self.feature_names = self.config.outcome_vars + list(set(metric_cols))
-        logger.info(f"Selected {len(self.feature_names)} features: {len(self.config.outcome_vars)} outcomes + {len(set(metric_cols))} metrics")
+        print(f"Selected {len(cols)} variables")
+        print(f"  Base variables: {base_vars}")
+        print(f"  Sensor metrics: {len(metric_cols)}")
         
-        # Limit samples if specified
-        if self.config.max_samples and len(df) > self.config.max_samples:
-            df = df.sample(n=self.config.max_samples, random_state=self.config.split_seed)
-            logger.info(f"Limited to {self.config.max_samples} samples")
-        
-        # Split subjects (not rows) for discovery/validation
-        unique_pids = df['pid'].unique()
-        np.random.seed(self.config.split_seed)
-        shuffled_pids = np.random.permutation(unique_pids)
-        
-        n_subjects = len(unique_pids)
-        discovery_split_point = int(n_subjects * self.config.discovery_split)
-        
-        discovery_pids = shuffled_pids[:discovery_split_point]
-        validation_pids = shuffled_pids[discovery_split_point:]
-        
-        self.df_discovery = df[df['pid'].isin(discovery_pids)].copy()
-        self.df_validation = df[df['pid'].isin(validation_pids)].copy()
-        
-        logger.info(f"Data split: {len(discovery_pids)} discovery subjects ({len(self.df_discovery)} rows), "
-                   f"{len(validation_pids)} validation subjects ({len(self.df_validation)} rows)")
-        
-        return self.df_discovery, self.df_validation
-    
-    def create_data_matrix(self, df: pd.DataFrame, standardize: bool = False) -> np.ndarray:
-        """Create clean numerical data matrix."""
-        X = (df[self.feature_names]
+        # Create data matrix
+        X = (df[cols]
              .apply(pd.to_numeric, errors="coerce")
              .dropna()
              .to_numpy())
         
-        if standardize:
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X)
-            logger.info("Applied standardization to data matrix")
+        print(f"Analysis matrix: {X.shape[0]} rows × {X.shape[1]} variables")
         
-        logger.info(f"Created data matrix: {X.shape[0]} rows × {X.shape[1]} variables")
-        return X
+        return cols, X
+
+
+class BackgroundKnowledgeBuilder:
+    """Create domain-specific background knowledge constraints."""
     
-    def create_background_knowledge(self) -> BackgroundKnowledge:
-        """Create background knowledge with domain-driven constraints."""
-        logger.info("Creating background knowledge constraints...")
-        
+    @staticmethod
+    def create_constraints(feature_names: List[str], 
+                          base_vars: List[str],
+                          forbid_sensor_correlations: bool = True,
+                          require_sensor_to_outcome: bool = True) -> BackgroundKnowledge:
+        """Create background knowledge constraints."""
         bk = BackgroundKnowledge()
-        nodes = [GraphNode(name) for name in self.feature_names]
+        nodes = [GraphNode(name) for name in feature_names]
         name_to_node = {n.get_name(): n for n in nodes}
         
         constraint_count = 0
         
-        # Constraint 1: Forbid mean ↔ std connections for same sensor
-        if self.config.forbid_sensor_correlations:
-            sensor_features = [name for name in self.feature_names if name not in self.config.outcome_vars]
-            processed_bases = set()
-            
-            for feature in sensor_features:
-                if feature.endswith('_mean'):
-                    base_name = feature.replace('_mean', '')
-                    std_feature = f"{base_name}_std"
-                    
-                    if std_feature in sensor_features and base_name not in processed_bases:
-                        bk.add_forbidden_by_node(name_to_node[feature], name_to_node[std_feature])
-                        bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
-                        processed_bases.add(base_name)
-                        constraint_count += 2
-                        logger.debug(f"Forbidden: {feature} ↔ {std_feature}")
-            
-            logger.info(f"Added {len(processed_bases)} forbidden sensor correlation pairs")
+        if forbid_sensor_correlations:
+            constraint_count += BackgroundKnowledgeBuilder._add_sensor_constraints(
+                bk, feature_names, base_vars, name_to_node
+            )
         
-        # Constraint 2: Require sensor → outcome directions
-        if self.config.require_sensor_to_outcome:
-            sensor_features = [name for name in self.feature_names if name not in self.config.outcome_vars]
-            
-            for sensor_feature in sensor_features:
-                for outcome_var in self.config.outcome_vars:
-                    if outcome_var in self.feature_names:
-                        bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
-                        constraint_count += 1
-                        logger.debug(f"Required: {sensor_feature} → {outcome_var}")
-            
-            logger.info(f"Added {len(sensor_features) * len([o for o in self.config.outcome_vars if o in self.feature_names])} required directions")
+        if require_sensor_to_outcome:
+            constraint_count += BackgroundKnowledgeBuilder._add_direction_constraints(
+                bk, feature_names, base_vars, name_to_node
+            )
         
-        logger.info(f"Total background knowledge constraints: {constraint_count}")
+        print(f"Created {constraint_count} background knowledge constraints")
         return bk
     
-    def run_pc_algorithm(self, X: np.ndarray, background_knowledge: Optional[BackgroundKnowledge] = None):
-        """Run PC algorithm with optional background knowledge."""
-        logger.info("Running PC algorithm...")
+    @staticmethod
+    def _add_sensor_constraints(bk: BackgroundKnowledge, 
+                               feature_names: List[str],
+                               base_vars: List[str],
+                               name_to_node: Dict) -> int:
+        """Forbid mean ↔ std connections for same sensor."""
+        sensor_features = [name for name in feature_names if name not in base_vars]
+        processed_bases = set()
+        count = 0
         
-        # Get independence test function
-        if self.config.independence_test == "fisherz":
-            indep_test = fisherz
-        else:
-            raise ValueError(f"Independence test {self.config.independence_test} not implemented")
-        
-        try:
-            cg = pc(
-                data=X,
-                alpha=self.config.alpha,
-                indep_test=indep_test,
-                stable=self.config.stable,
-                uc_rule=self.config.uc_rule,
-                background_knowledge=background_knowledge,
-                node_names=self.feature_names,
-                verbose=self.config.verbose
-            )
-            
-            if cg is None or cg.G is None:
-                logger.error("PC algorithm returned None result")
-                return None
-            
-            logger.info("PC algorithm completed successfully")
-            return cg
-            
-        except Exception as e:
-            logger.error(f"PC algorithm failed: {str(e)}")
-            return None
-    
-    def extract_edges(self, graph, feature_names: List[str]) -> List[Dict[str, Any]]:
-        """Extract edges from causal graph."""
-        edges = []
-        n_nodes = len(feature_names)
-        adj_matrix = graph.graph
-        
-        for i in range(n_nodes):
-            for j in range(i + 1, n_nodes):
-                from_var = feature_names[i]
-                to_var = feature_names[j]
+        for feature in sensor_features:
+            if feature.endswith('_mean'):
+                base_name = feature.replace('_mean', '')
+                std_feature = f"{base_name}_std"
                 
-                if adj_matrix[i, j] != 0 or adj_matrix[j, i] != 0:
-                    if adj_matrix[i, j] != 0 and adj_matrix[j, i] != 0:
-                        # Undirected edge
-                        edges.append({
-                            "from": from_var,
-                            "to": to_var,
-                            "type": "undirected",
-                            "strength": abs(adj_matrix[i, j])
-                        })
-                    elif adj_matrix[i, j] != 0:
-                        # Directed edge i -> j
-                        edges.append({
-                            "from": from_var,
-                            "to": to_var,
-                            "type": "directed",
-                            "strength": abs(adj_matrix[i, j])
-                        })
-                    elif adj_matrix[j, i] != 0:
-                        # Directed edge j -> i
-                        edges.append({
-                            "from": to_var,
-                            "to": from_var,
-                            "type": "directed",
-                            "strength": abs(adj_matrix[j, i])
-                        })
+                if std_feature in sensor_features and base_name not in processed_bases:
+                    bk.add_forbidden_by_node(name_to_node[feature], name_to_node[std_feature])
+                    bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
+                    processed_bases.add(base_name)
+                    count += 2
         
-        return edges
+        return count
     
-    def save_graph(self, graph, filename: str, title: str = "Causal Graph") -> None:
-        """Save causal graph as image."""
-        if not self.config.save_graphs:
-            return
+    @staticmethod
+    def _add_direction_constraints(bk: BackgroundKnowledge,
+                                  feature_names: List[str],
+                                  base_vars: List[str],
+                                  name_to_node: Dict) -> int:
+        """Require sensor → outcome directions."""
+        sensor_features = [name for name in feature_names if name not in base_vars]
+        outcome_vars = [name for name in feature_names if name in base_vars]
+        count = 0
         
-        try:
-            pyd = GraphUtils.to_pydot(graph, labels=self.feature_names)
-            
-            # Save to file
-            filepath = self.output_dir / filename
-            if self.config.graph_format.lower() == "png":
-                pyd.write_png(str(filepath))
-            elif self.config.graph_format.lower() == "svg":
-                pyd.write_svg(str(filepath))
-            else:
-                pyd.write_png(str(filepath.with_suffix('.png')))
-            
-            logger.info(f"Saved graph to {filepath}")
-            
-            # Display if requested
-            if self.config.show_graphs:
-                img_data = pyd.create_png()
-                img = mpimg.imread(io.BytesIO(img_data), format="png")
-                
-                plt.figure(figsize=self.config.figure_size)
-                plt.title(title, fontsize=16, fontweight='bold')
-                plt.axis("off")
-                plt.imshow(img)
-                plt.tight_layout()
-                plt.show()
-                
-        except Exception as e:
-            logger.error(f"Failed to save graph: {str(e)}")
+        for sensor_feature in sensor_features:
+            for outcome_var in outcome_vars:
+                bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
+                count += 1
+        
+        return count
+
+
+class BootstrapAnalyzer:
+    """Handle bootstrap causal discovery analysis."""
     
-    def bootstrap_analysis(self, X: np.ndarray) -> Dict[str, Any]:
-        """Run bootstrap analysis for edge stability."""
-        logger.info(f"Starting bootstrap analysis with {self.config.n_bootstrap} iterations...")
+    @staticmethod
+    def run_bootstrap_analysis(X: np.ndarray,
+                              feature_names: List[str],
+                              base_vars: List[str],
+                              n_bootstrap: int = 100,
+                              sample_frac: float = 0.6,
+                              alpha: float = 0.05,
+                              key_edges: List[Tuple[str, str]] = None) -> Dict[str, Any]:
+        """Run bootstrap analysis with PC algorithm."""
+        
+        if key_edges is None:
+            key_edges = [
+                ("rem_std", "promis_dep_sum"),
+                ("deep_std", "promis_dep_sum"),
+                ("promis_anx_sum", "promis_dep_sum")
+            ]
+        
+        print(f"Starting bootstrap analysis: {n_bootstrap} iterations, {sample_frac*100}% sampling")
         
         edge_counts = defaultdict(int)
-        edge_directions = defaultdict(list)
-        key_edge_counts = {str(edge): 0 for edge in self.config.key_edges}
+        key_edge_counts = {str(edge): 0 for edge in key_edges}
         successful_iterations = 0
         
-        for i in tqdm(range(self.config.n_bootstrap), desc="Bootstrap iterations"):
+        for i in tqdm(range(n_bootstrap), desc="Bootstrap"):
             try:
-                # Sample data
-                n_sample = int(X.shape[0] * self.config.bootstrap_sample_frac)
+                # Bootstrap sample
+                n_sample = int(X.shape[0] * sample_frac)
                 sample_indices = random.sample(range(X.shape[0]), n_sample)
                 X_bootstrap = X[sample_indices, :]
                 
-                # Create background knowledge for this iteration
-                bk_bootstrap = self.create_background_knowledge()
+                # Create background knowledge
+                bk = BackgroundKnowledgeBuilder.create_constraints(feature_names, base_vars)
                 
                 # Run PC algorithm silently
                 with open(os.devnull, 'w') as devnull:
                     with redirect_stdout(devnull), redirect_stderr(devnull):
-                        cg_bootstrap = self.run_pc_algorithm(X_bootstrap, bk_bootstrap)
+                        cg = pc(
+                            data=X_bootstrap,
+                            alpha=alpha,
+                            indep_test=fisherz,
+                            stable=True,
+                            uc_rule=0,
+                            background_knowledge=bk,
+                            node_names=feature_names,
+                            verbose=False
+                        )
                 
-                if cg_bootstrap is None or cg_bootstrap.G is None:
+                if cg is None or cg.G is None:
                     continue
                 
                 # Extract edges
-                edges = self.extract_edges(cg_bootstrap.G, self.feature_names)
-                edges_this_iteration = set()
-                
-                for edge in edges:
-                    if edge["type"] == "undirected":
-                        edge_key = tuple(sorted([edge["from"], edge["to"]]))
-                    else:
-                        edge_key = (edge["from"], edge["to"])
-                    
-                    edge_counts[edge_key] += 1
-                    edge_directions[edge_key].append(edge["type"])
-                    edges_this_iteration.add(edge_key)
+                edges_this_iteration = BootstrapAnalyzer._extract_edges(
+                    cg.G, feature_names, edge_counts
+                )
                 
                 # Count key edges
-                for key_edge in self.config.key_edges:
-                    key_edge_str = str(key_edge)
-                    if (key_edge in edges_this_iteration or 
-                        tuple(sorted(key_edge)) in edges_this_iteration or
-                        (key_edge[1], key_edge[0]) in edges_this_iteration):
-                        key_edge_counts[key_edge_str] += 1
+                BootstrapAnalyzer._count_key_edges(
+                    edges_this_iteration, key_edges, key_edge_counts
+                )
                 
                 successful_iterations += 1
                 
-            except Exception as e:
-                logger.debug(f"Bootstrap iteration {i} failed: {str(e)}")
+            except Exception:
                 continue
         
-        logger.info(f"Bootstrap analysis completed: {successful_iterations}/{self.config.n_bootstrap} successful iterations")
+        print(f"Bootstrap completed: {successful_iterations}/{n_bootstrap} successful iterations")
         
         return {
-            "edge_counts": dict(edge_counts),
-            "edge_directions": dict(edge_directions),
-            "key_edge_counts": key_edge_counts,
-            "successful_iterations": successful_iterations,
-            "total_iterations": self.config.n_bootstrap
+            'edge_counts': dict(edge_counts),
+            'key_edge_counts': key_edge_counts,
+            'successful_iterations': successful_iterations,
+            'total_iterations': n_bootstrap,
+            'key_edges': key_edges
         }
     
-    def analyze_stability(self, bootstrap_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze edge stability from bootstrap results."""
-        successful_iterations = bootstrap_results["successful_iterations"]
-        key_edge_counts = bootstrap_results["key_edge_counts"]
+    @staticmethod
+    def _extract_edges(graph, feature_names: List[str], edge_counts: Dict) -> List[Tuple]:
+        """Extract edges from causal graph."""
+        n_nodes = len(feature_names)
+        adj_matrix = graph.graph
+        edges_this_iteration = []
+        
+        for i_node in range(n_nodes):
+            for j_node in range(i_node + 1, n_nodes):
+                from_var = feature_names[i_node]
+                to_var = feature_names[j_node]
+                
+                if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
+                    if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
+                        # Undirected
+                        edge_key = tuple(sorted([from_var, to_var]))
+                    elif adj_matrix[i_node, j_node] != 0:
+                        # Directed i -> j
+                        edge_key = (from_var, to_var)
+                    elif adj_matrix[j_node, i_node] != 0:
+                        # Directed j -> i
+                        edge_key = (to_var, from_var)
+                    
+                    edge_counts[edge_key] += 1
+                    edges_this_iteration.append(edge_key)
+        
+        return edges_this_iteration
+    
+    @staticmethod
+    def _count_key_edges(edges_this_iteration: List[Tuple],
+                        key_edges: List[Tuple[str, str]],
+                        key_edge_counts: Dict[str, int]) -> None:
+        """Count occurrences of key edges."""
+        for edge in key_edges:
+            edge_str = str(edge)
+            if (edge in edges_this_iteration or 
+                tuple(sorted(edge)) in edges_this_iteration or
+                (edge[1], edge[0]) in edges_this_iteration):
+                key_edge_counts[edge_str] += 1
+
+
+class ResultsAnalyzer:
+    """Analyze and compare results across datasets."""
+    
+    @staticmethod
+    def analyze_stability(results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Calculate stability metrics for key edges."""
+        key_edge_counts = results['key_edge_counts']
+        successful_iterations = results['successful_iterations']
         
         stability_analysis = {}
         
         for edge_str, count in key_edge_counts.items():
             stability = count / successful_iterations if successful_iterations > 0 else 0
             
-            if stability >= self.config.stability_thresholds["strong"]:
+            if stability >= 0.7:
                 assessment = "STRONG"
-            elif stability >= self.config.stability_thresholds["moderate"]:
+            elif stability >= 0.5:
                 assessment = "MODERATE"
-            elif stability >= self.config.stability_thresholds["weak"]:
+            elif stability >= 0.3:
                 assessment = "WEAK"
             else:
                 assessment = "UNSTABLE"
             
             stability_analysis[edge_str] = {
-                "count": count,
-                "total": successful_iterations,
-                "stability": stability,
-                "assessment": assessment
+                'count': count,
+                'total': successful_iterations,
+                'stability': stability,
+                'assessment': assessment
             }
         
         return stability_analysis
     
-    def save_results(self, bootstrap_results: Dict[str, Any], stability_analysis: Dict[str, Any], 
-                    edges: List[Dict[str, Any]]) -> None:
-        """Save analysis results to files."""
+    @staticmethod
+    def compare_temporal_results(all_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Compare results across temporal windows."""
+        print(f"\n{'='*60}")
+        print("RESULTS COMPARISON")
+        print(f"{'='*60}")
         
-        # Save bootstrap edge stability
-        if self.config.save_bootstrap_results:
-            edge_counts = bootstrap_results["edge_counts"]
-            successful_iterations = bootstrap_results["successful_iterations"]
+        comparison = {
+            'dataset_results': {},
+            'consistency_analysis': {}
+        }
+        
+        # Analyze each dataset
+        for dataset_name, results in all_results.items():
+            if results:
+                stability_analysis = ResultsAnalyzer.analyze_stability(results)
+                comparison['dataset_results'][dataset_name] = stability_analysis
+                
+                total = results['successful_iterations']
+                print(f"\n{dataset_name}:")
+                
+                for edge_str, analysis in stability_analysis.items():
+                    count = analysis['count']
+                    stability = analysis['stability']
+                    assessment = analysis['assessment']
+                    print(f"  {edge_str}: {count}/{total} ({stability*100:.1f}%) - {assessment}")
+        
+        # Consistency assessment
+        if len(comparison['dataset_results']) >= 2:
+            comparison['consistency_analysis'] = ResultsAnalyzer._assess_consistency(
+                comparison['dataset_results']
+            )
+        
+        return comparison
+    
+    @staticmethod
+    def _assess_consistency(dataset_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Assess consistency of key relationships across datasets."""
+        print(f"\nConsistency Assessment:")
+        
+        consistency_analysis = {}
+        
+        # Get all unique edges
+        all_edges = set()
+        for results in dataset_results.values():
+            all_edges.update(results.keys())
+        
+        for edge_str in all_edges:
+            stabilities = []
+            assessments = []
             
-            bootstrap_df = pd.DataFrame([
-                {
-                    'from_var': edge[0] if isinstance(edge, tuple) and len(edge) >= 2 else str(edge),
-                    'to_var': edge[1] if isinstance(edge, tuple) and len(edge) >= 2 else "",
-                    'frequency': count / successful_iterations,
-                    'count': count,
-                    'total_iterations': successful_iterations
+            for dataset_name, results in dataset_results.items():
+                if edge_str in results:
+                    stabilities.append(results[edge_str]['stability'])
+                    assessments.append(results[edge_str]['assessment'])
+            
+            if len(stabilities) >= 2:
+                stability_diff = max(stabilities) - min(stabilities)
+                consistency = "HIGH" if stability_diff < 0.2 else "MODERATE" if stability_diff < 0.4 else "LOW"
+                
+                consistency_analysis[edge_str] = {
+                    'stabilities': stabilities,
+                    'difference': stability_diff,
+                    'consistency': consistency,
+                    'assessments': assessments
                 }
-                for edge, count in edge_counts.items() 
-                if isinstance(edge, tuple) and len(edge) == 2
-            ]).sort_values('frequency', ascending=False)
-            
-            bootstrap_file = self.output_dir / self.config.generate_filename("bootstrap_results")
-            bootstrap_df.to_csv(bootstrap_file, index=False)
-            logger.info(f"Saved bootstrap results to {bootstrap_file}")
+                
+                # Clean edge name for display
+                edge_display = edge_str.replace("('", "").replace("')", "").replace("', '", " → ")
+                print(f"  {edge_display}: {consistency} consistency")
+                
+                for i, (dataset_name, stability) in enumerate(zip(dataset_results.keys(), stabilities)):
+                    print(f"    {dataset_name}: {stability:.1%} ({assessments[i]})")
         
-        # Save edge summary
-        if edges:
-            edges_df = pd.DataFrame(edges)
-            edge_file = self.output_dir / self.config.generate_filename("edge_summary")
-            edges_df.to_csv(edge_file, index=False)
-            logger.info(f"Saved edge summary to {edge_file}")
+        return consistency_analysis
+    
+    @staticmethod
+    def save_results(comparison_results: Dict[str, Any], 
+                    output_dir: str = "results/temporal_analysis") -> None:
+        """Save analysis results to files."""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
-        # Save data summary
-        summary_file = self.output_dir / self.config.generate_filename("data_summary")
+        # Save summary
+        summary_file = output_path / "temporal_analysis_summary.txt"
         with open(summary_file, 'w') as f:
-            f.write("Causal Discovery Analysis Summary\n")
+            f.write("Temporal Causal Discovery Analysis Summary\n")
             f.write("=" * 50 + "\n\n")
             
-            f.write("Configuration:\n")
-            f.write(f"- Algorithm: PC with alpha={self.config.alpha}\n")
-            f.write(f"- Bootstrap iterations: {self.config.n_bootstrap}\n")
-            f.write(f"- Sample fraction: {self.config.bootstrap_sample_frac}\n")
-            f.write(f"- Discovery split: {self.config.discovery_split}\n")
-            f.write(f"- Features: {len(self.feature_names)}\n")
-            f.write(f"- Background knowledge: {self.config.forbid_sensor_correlations and self.config.require_sensor_to_outcome}\n\n")
+            f.write("Dataset Results:\n")
+            for dataset_name, results in comparison_results['dataset_results'].items():
+                f.write(f"\n{dataset_name}:\n")
+                for edge_str, analysis in results.items():
+                    f.write(f"  {edge_str}: {analysis['stability']:.1%} ({analysis['assessment']})\n")
             
-            f.write("Key Edge Stability:\n")
-            for edge_str, analysis in stability_analysis.items():
-                f.write(f"- {edge_str}: {analysis['count']}/{analysis['total']} "
-                       f"({analysis['stability']:.1%}) - {analysis['assessment']}\n")
-            
-            f.write(f"\nFiles generated:\n")
-            f.write(f"- Bootstrap results: {self.config.generate_filename('bootstrap_results')}\n")
-            f.write(f"- Edge summary: {self.config.generate_filename('edge_summary')}\n")
-            f.write(f"- PC graph: {self.config.generate_filename('pc_graph')}\n")
+            if 'consistency_analysis' in comparison_results:
+                f.write("\nConsistency Analysis:\n")
+                for edge_str, consistency_info in comparison_results['consistency_analysis'].items():
+                    f.write(f"  {edge_str}: {consistency_info['consistency']} consistency\n")
         
-        logger.info(f"Saved analysis summary to {summary_file}")
+        print(f"\nResults saved to {summary_file}")
+
+
+class TemporalCausalAnalyzer:
+    """Main orchestrator for temporal causal discovery analysis."""
     
-    def run_full_analysis(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Run complete causal discovery analysis."""
-        logger.info("Starting full causal discovery analysis...")
+    def __init__(self, 
+                 base_vars: List[str] = None,
+                 exclude_patterns: List[str] = None,
+                 key_edges: List[Tuple[str, str]] = None,
+                 n_bootstrap: int = 100,
+                 sample_frac: float = 0.6,
+                 alpha: float = 0.05):
         
-        # Prepare data
-        self.prepare_data(df)
-        self.X_discovery = self.create_data_matrix(self.df_discovery)
+        self.base_vars = base_vars or ["promis_dep_sum", "promis_anx_sum"]
+        self.exclude_patterns = exclude_patterns or ["total_"]
+        self.key_edges = key_edges or [
+            ("rem_std", "promis_dep_sum"),
+            ("deep_std", "promis_dep_sum"),
+            ("promis_anx_sum", "promis_dep_sum")
+        ]
+        self.n_bootstrap = n_bootstrap
+        self.sample_frac = sample_frac
+        self.alpha = alpha
         
-        # Create background knowledge
-        background_knowledge = self.create_background_knowledge()
+        self.results = {}
+    
+    def analyze_dataset(self, filepath: str, dataset_name: str) -> Optional[Dict[str, Any]]:
+        """Analyze a single dataset."""
+        # Load and clean data
+        df = DataProcessor.load_dataset(filepath, dataset_name)
+        if df is None:
+            return None
         
-        # Run PC algorithm on discovery set
-        logger.info("Running PC algorithm on discovery set...")
-        cg = self.run_pc_algorithm(self.X_discovery, background_knowledge)
+        cleaned_df = DataProcessor.clean_dataset(df)
         
-        if cg is None:
-            logger.error("PC algorithm failed, cannot continue analysis")
-            return {}
-        
-        # Extract edges
-        edges = self.extract_edges(cg.G, self.feature_names)
-        logger.info(f"Discovered {len(edges)} edges")
-        
-        # Save main graph
-        graph_filename = self.config.generate_filename("pc_graph")
-        self.save_graph(cg.G, graph_filename, "PC Algorithm - Discovery Set")
+        # Prepare variables and data matrix
+        feature_names, X = DataProcessor.prepare_variables(
+            cleaned_df, self.base_vars, self.exclude_patterns
+        )
         
         # Run bootstrap analysis
-        bootstrap_results = self.bootstrap_analysis(self.X_discovery)
-        
-        # Analyze stability
-        stability_analysis = self.analyze_stability(bootstrap_results)
-        
-        # Save all results
-        self.save_results(bootstrap_results, stability_analysis, edges)
-        
-        # Print summary
-        logger.info("\n" + "=" * 60)
-        logger.info("CAUSAL DISCOVERY RESULTS")
-        logger.info("=" * 60)
-        
-        for edge_str, analysis in stability_analysis.items():
-            logger.info(f"{edge_str}: {analysis['count']}/{analysis['total']} "
-                       f"({analysis['stability']:.1%}) - {analysis['assessment']}")
-        
-        return {
-            "causal_graph": cg,
-            "edges": edges,
-            "bootstrap_results": bootstrap_results,
-            "stability_analysis": stability_analysis,
-            "feature_names": self.feature_names
-        }
-
-
-# Unit Testing
-class TestCausalDiscoveryAnalyzer(unittest.TestCase):
-    """Unit tests for CausalDiscoveryAnalyzer."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.config = CausalDiscoveryConfig(
-            n_bootstrap=5,  # Small number for testing
-            max_samples=100,
-            show_graphs=False,
-            save_graphs=False
+        results = BootstrapAnalyzer.run_bootstrap_analysis(
+            X, feature_names, self.base_vars,
+            n_bootstrap=self.n_bootstrap,
+            sample_frac=self.sample_frac,
+            alpha=self.alpha,
+            key_edges=self.key_edges
         )
+        
+        return results
     
-    def test_config_validation(self):
-        """Test configuration validation."""
-        with self.assertRaises(ValueError):
-            CausalDiscoveryConfig(discovery_split=0)
+    def analyze_multiple_datasets(self, dataset_paths: Dict[str, str]) -> Dict[str, Any]:
+        """Analyze multiple datasets and compare results."""
+        print("=" * 70)
+        print("TEMPORAL CAUSAL DISCOVERY ANALYSIS")
+        print("=" * 70)
         
-        with self.assertRaises(ValueError):
-            CausalDiscoveryConfig(alpha=0)
+        # Analyze each dataset
+        for dataset_name, filepath in dataset_paths.items():
+            self.results[dataset_name] = self.analyze_dataset(filepath, dataset_name)
         
-        with self.assertRaises(ValueError):
-            CausalDiscoveryConfig(n_bootstrap=0)
-    
-    def test_filename_generation(self):
-        """Test filename generation."""
-        filename = self.config.generate_filename("bootstrap_results")
-        self.assertIn("alpha0.05", filename)
-        self.assertIn("bs5", filename)
-        self.assertIn("bootstrap_stability.csv", filename)
-    
-    def test_data_preparation(self):
-        """Test data preparation with mock data."""
-        # Create mock data
-        np.random.seed(42)
-        mock_data = pd.DataFrame({
-            'pid': np.repeat(range(10), 5),
-            'promis_dep_sum': np.random.normal(10, 2, 50),
-            'promis_anx_sum': np.random.normal(8, 2, 50),
-            'hr_average_mean': np.random.normal(70, 10, 50),
-            'hr_average_std': np.random.normal(5, 2, 50),
-            'total_sleep_mean': np.random.normal(8, 1, 50)  # Should be excluded
-        })
+        # Compare results
+        comparison_results = ResultsAnalyzer.compare_temporal_results(self.results)
         
-        analyzer = CausalDiscoveryAnalyzer(self.config)
-        df_discovery, df_validation = analyzer.prepare_data(mock_data)
+        # Save results
+        ResultsAnalyzer.save_results(comparison_results)
         
-        # Check splits
-        self.assertGreater(len(df_discovery), 0)
-        self.assertGreater(len(df_validation), 0)
+        print(f"\n{'='*70}")
+        print("ANALYSIS COMPLETE")
+        print(f"{'='*70}")
         
-        # Check feature selection
-        self.assertIn('promis_dep_sum', analyzer.feature_names)
-        self.assertIn('hr_average_mean', analyzer.feature_names)
-        self.assertNotIn('total_sleep_mean', analyzer.feature_names)  # Should be excluded
-    
-    def test_background_knowledge_creation(self):
-        """Test background knowledge creation."""
-        analyzer = CausalDiscoveryAnalyzer(self.config)
-        analyzer.feature_names = ['promis_dep_sum', 'hr_average_mean', 'hr_average_std']
-        
-        bk = analyzer.create_background_knowledge()
-        self.assertIsNotNone(bk)
-    
-    def test_edge_extraction(self):
-        """Test edge extraction from mock graph."""
-        # This would require creating a mock causal graph object
-        # For now, just test that the method exists and can be called
-        analyzer = CausalDiscoveryAnalyzer(self.config)
-        analyzer.feature_names = ['var1', 'var2']
-        
-        # Test with mock adjacency matrix
-        class MockGraph:
-            def __init__(self):
-                self.graph = np.array([[0, 1], [0, 0]])  # var1 -> var2
-        
-        mock_graph = MockGraph()
-        edges = analyzer.extract_edges(mock_graph, ['var1', 'var2'])
-        
-        self.assertEqual(len(edges), 1)
-        self.assertEqual(edges[0]['from'], 'var1')
-        self.assertEqual(edges[0]['to'], 'var2')
-        self.assertEqual(edges[0]['type'], 'directed')
+        return comparison_results
 
 
-def run_causal_discovery(df: pd.DataFrame, config: CausalDiscoveryConfig) -> Dict[str, Any]:
-    """Convenience function to run causal discovery with given configuration."""
-    analyzer = CausalDiscoveryAnalyzer(config)
-    return analyzer.run_full_analysis(df)
+def run_temporal_causal_analysis(dataset_paths: Dict[str, str],
+                                **kwargs) -> Dict[str, Any]:
+    """Convenience function to run complete temporal analysis."""
+    analyzer = TemporalCausalAnalyzer(**kwargs)
+    return analyzer.analyze_multiple_datasets(dataset_paths)
 
 
-# Example configurations
-def get_example_configs() -> Dict[str, CausalDiscoveryConfig]:
-    """Get example configurations for common use cases."""
-    return {
-        "standard": CausalDiscoveryConfig(
-            alpha=0.05,
-            n_bootstrap=100,
-            bootstrap_sample_frac=0.6
-        ),
-        "strict": CausalDiscoveryConfig(
-            alpha=0.01,  # More strict independence test
-            n_bootstrap=200,
-            bootstrap_sample_frac=0.5
-        ),
-        "exploratory": CausalDiscoveryConfig(
-            alpha=0.1,  # More liberal
-            n_bootstrap=50,
-            forbid_sensor_correlations=False,  # Allow all connections
-            require_sensor_to_outcome=False
-        ),
-        "quick_test": CausalDiscoveryConfig(
-            alpha=0.05,
-            n_bootstrap=20,
-            max_samples=1000,
-            bootstrap_sample_frac=0.8
-        ),
-        "detailed": CausalDiscoveryConfig(
-            alpha=0.05,
-            n_bootstrap=500,  # More bootstrap iterations
-            bootstrap_sample_frac=0.5,
-            stability_thresholds={
-                "strong": 0.8,    # Higher thresholds
-                "moderate": 0.6,
-                "weak": 0.4
-            }
-        )
-    }
-
-
+# Example usage
 if __name__ == "__main__":
-    # Run unit tests
-    print("Running unit tests...")
-    unittest.main(argv=[''], exit=False, verbosity=2)
+    # Example dataset paths
+    dataset_paths = {
+        "1w_to_5w_after": "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv",
+        "6w_to_2w_before": "data/preprocessed/full_run/6w_to_2w_before/survey_wearable_42d_before_to_14d_before_baseline_adj_full.csv"
+    }
     
-    # Example usage
-    print("\nExample configurations:")
-    configs = get_example_configs()
-    
-    for name, config in configs.items():
-        print(f"\n{name.upper()}:")
-        print(f"  Alpha: {config.alpha}")
-        print(f"  Bootstrap iterations: {config.n_bootstrap}")
-        print(f"  Sample fraction: {config.bootstrap_sample_frac}")
-        print(f"  Background knowledge: {config.forbid_sensor_correlations and config.require_sensor_to_outcome}")
-        print(f"  Output files: {config.generate_filename('bootstrap_results')}")
+    # Run analysis
+    results = run_temporal_causal_analysis(
+        dataset_paths,
+        n_bootstrap=100,  # Same as your successful analysis
+        sample_frac=0.6,  # Same as your successful analysis
+        alpha=0.05
+    )
