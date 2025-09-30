@@ -17,7 +17,7 @@ A modular, configurable system for preprocessing Oura wearable data with survey 
 
 1. Ensure you have the required dependencies:
 ```bash
-pip install pandas numpy pyarrow scipy tqdm
+mamba create -n causal_analysis python=3.10 --file requirements.txt
 ```
 
 2. Set up your data directory structure:
@@ -53,7 +53,7 @@ print(f"Results saved to: {main_file}")
 ```python
 from data_utils import get_example_configs
 
-# Get predefined configurations
+# Get some predefined configurations, does not necessarily have to follow
 configs = get_example_configs()
 
 # Available configurations:
@@ -289,8 +289,6 @@ Default metrics processed:
 
 - **mean**: Average value over time window
 - **std**: Standard deviation over time window  
-- **rms**: Root mean square over time window
-- **skew**: Skewness over time window
 
 ## Contributing
 
@@ -306,435 +304,190 @@ When adding new features:
 
 [Add your license information here]
 
-# Causal Discovery System for Wearable Data
+# Causal Discovery with PC Algorithm
 
-A modular, configurable system for causal discovery analysis of wearable sensor data with psychological survey responses, featuring bootstrap stability analysis and domain knowledge integration.
+Simple, modular system for causal discovery analysis on wearable sensor and psychological survey data using the PC algorithm with bootstrap stability assessment.
 
 ## Features
 
-- **PC Algorithm Implementation**: Constraint-based causal discovery with statistical independence testing
-- **Bootstrap Stability Analysis**: Robust edge stability assessment across multiple data samples
-- **Domain Knowledge Integration**: Incorporate expert knowledge as constraints
-- **Configurable Parameters**: Easy adjustment of statistical thresholds and analysis settings
-- **Discovery/Validation Splits**: Proper separation for unbiased causal inference
-- **Graph Visualization**: Automatic generation and saving of causal graphs
-- **Comprehensive Logging**: Track analysis progress and edge stability
-- **Edge Tracking**: Monitor stability of key relationships of interest
-- **Multiple Output Formats**: CSV results, graph images, and analysis summaries
+- PC algorithm implementation with Fisher's Z independence test
+- Bootstrap stability analysis for robust edge detection
+- Domain knowledge constraints (sensor→outcome directionality, no mean↔std correlations)
+- Multi-dataset comparison
+- Key edge tracking across datasets
 
 ## Installation
 
-### Required Dependencies
-
 ```bash
-# Core dependencies
-pip install pandas numpy matplotlib scikit-learn tqdm
-
-# Causal discovery (main requirement)
-pip install causal-learn
-
-# Optional: Enhanced visualization
-pip install graphviz pydot
-```
-
-### Directory Structure
-
-```
-results/
-└── causal_discovery/
-    ├── standard/
-    ├── exploratory/
-    ├── strict/
-    └── custom/
-        ├── *_bootstrap_stability.csv
-        ├── *_pc_graph.png
-        ├── *_edge_summary.csv
-        └── *_data_summary.txt
+pip install pandas numpy causal-learn tqdm
 ```
 
 ## Quick Start
 
-### Basic Causal Discovery
-
 ```python
-from causal_discovery_utils import CausalDiscoveryConfig, run_causal_discovery
-import pandas as pd
+from causal_discovery import run_pc_analysis
 
-# Load your preprocessed data
-df = pd.read_csv("data/preprocessed/survey_wearable_30d_before_to_0d_before_baseline_adj_full.csv")
-
-# Standard configuration
-config = CausalDiscoveryConfig(
-    alpha=0.05,              # Statistical significance threshold
-    n_bootstrap=100,         # Bootstrap iterations for stability
-    bootstrap_sample_frac=0.6,  # Fraction of data per bootstrap
-    discovery_split=0.5      # Train/validation split
-)
-
-# Run complete analysis
-results = run_causal_discovery(df, config)
-
-# Results contain discovered edges and stability analysis
-print(f"Discovered {len(results['edges'])} causal relationships")
-for edge, analysis in results['stability_analysis'].items():
-    print(f"{edge}: {analysis['stability']:.1%} stable ({analysis['assessment']})")
-```
-
-### Key Edge Monitoring
-
-```python
-# Focus on specific relationships of interest
-config = CausalDiscoveryConfig(
-    key_edges=[
-        ("rem_std", "promis_dep_sum"),      # REM sleep variability → Depression
-        ("deep_std", "promis_dep_sum"),     # Deep sleep variability → Depression  
-        ("hr_average_std", "promis_anx_sum"), # HR variability → Anxiety
-        ("promis_anx_sum", "promis_dep_sum")  # Anxiety → Depression
-    ]
-)
-
-results = run_causal_discovery(df, config)
-
-# Get stability for key relationships
-for edge_str, analysis in results['stability_analysis'].items():
-    print(f"{edge_str}: {analysis['count']}/{analysis['total']} iterations "
-          f"({analysis['stability']:.1%}) - {analysis['assessment']}")
-```
-
-## Configuration Options
-
-### CausalDiscoveryConfig Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `alpha` | float | 0.05 | Statistical significance for independence tests |
-| `n_bootstrap` | int | 100 | Number of bootstrap iterations |
-| `bootstrap_sample_frac` | float | 0.6 | Fraction of data per bootstrap sample |
-| `discovery_split` | float | 0.5 | Fraction for discovery vs validation |
-| `forbid_sensor_correlations` | bool | True | Prevent mean ↔ std edges for same sensor |
-| `require_sensor_to_outcome` | bool | True | Enforce sensor → outcome directionality |
-| `key_edges` | List[Tuple] | See config | Specific edges to track |
-| `stability_thresholds` | Dict | See below | Thresholds for stability assessment |
-
-### Stability Assessment Thresholds
-
-```python
-stability_thresholds = {
-    "strong": 0.7,     # ≥70% bootstrap frequency
-    "moderate": 0.5,   # ≥50% bootstrap frequency  
-    "weak": 0.3        # ≥30% bootstrap frequency
-}
-# <30% = "unstable"
-```
-
-### Algorithm Parameters
-
-- **Independence Test**: Fisher's Z-test (default) for continuous variables
-- **PC Algorithm**: Stable version with orientation rules
-- **Background Knowledge**: Domain constraints as forbidden/required edges
-
-## Analysis Types
-
-### 1. Standard Analysis
-
-Default settings with domain knowledge constraints:
-
-```python
-config = CausalDiscoveryConfig()  # Use defaults
-results = run_causal_discovery(df, config)
-```
-
-**Features:**
-- 50/50 discovery/validation split
-- Statistical significance α = 0.05
-- 100 bootstrap iterations with 60% sampling
-- Domain constraints (sensor → outcome, no mean ↔ std)
-
-### 2. Exploratory Analysis
-
-Liberal settings for hypothesis generation:
-
-```python
-config = CausalDiscoveryConfig(
-    alpha=0.1,                          # More liberal
-    forbid_sensor_correlations=False,   # Allow all connections
-    require_sensor_to_outcome=False,    # Bidirectional exploration
-    n_bootstrap=50
-)
-```
-
-### 3. Strict Analysis
-
-Conservative settings for robust relationships:
-
-```python
-config = CausalDiscoveryConfig(
-    alpha=0.01,                         # Very strict
-    n_bootstrap=200,                    # More iterations
-    bootstrap_sample_frac=0.5,          # Smaller samples
-    stability_thresholds={
-        "strong": 0.8,                  # Higher thresholds
-        "moderate": 0.6,
-        "weak": 0.4
-    }
-)
-```
-
-### 4. Custom Edge Analysis
-
-Focus on specific relationships:
-
-```python
-config = CausalDiscoveryConfig(
-    key_edges=[
-        ("sleep_metric", "depression_score"),
-        ("hr_variability", "anxiety_score")
-    ]
-)
-```
-
-## Domain Knowledge Constraints
-
-### Sensor Correlation Constraints
-
-Prevents spurious correlations between mean and standard deviation of the same sensor:
-
-```python
-# Forbidden: hr_average_mean ↔ hr_average_std
-# Forbidden: rem_mean ↔ rem_std
-# etc.
-```
-
-### Temporal Precedence Constraints
-
-Enforces causal direction based on temporal logic:
-
-```python
-# Required: sensor_metric → psychological_outcome
-# Required: hr_average_mean → promis_dep_sum
-# Required: sleep_efficiency → promis_anx_sum
-# etc.
-```
-
-## Output Files
-
-### File Naming Convention
-
-Files are named descriptively based on configuration:
-
-```
-causal_discovery_alpha{alpha}_bs{n_bootstrap}_{type}.{ext}
-```
-
-**Examples:**
-- `causal_discovery_alpha0.05_bs100_bootstrap_stability.csv`
-- `causal_discovery_alpha0.01_bs200_strict_pc_graph.png`
-
-### Bootstrap Stability Results
-
-**File:** `*_bootstrap_stability.csv`
-
-| Column | Description |
-|--------|-------------|
-| `from_var` | Source variable |
-| `to_var` | Target variable |
-| `frequency` | Proportion of bootstrap iterations with edge |
-| `count` | Number of iterations with edge |
-| `total_iterations` | Total successful bootstrap iterations |
-
-### Edge Summary
-
-**File:** `*_edge_summary.csv`
-
-| Column | Description |
-|--------|-------------|
-| `from` | Source variable |
-| `to` | Target variable |
-| `type` | Edge type (directed/undirected) |
-| `strength` | Edge strength from final model |
-
-### Analysis Summary
-
-**File:** `*_data_summary.txt`
-
-Human-readable summary including:
-- Configuration parameters
-- Key edge stability results
-- File locations
-- Assessment classifications
-
-## Advanced Usage
-
-### Manual Step-by-Step Analysis
-
-```python
-from causal_discovery_utils import CausalDiscoveryAnalyzer
-
-analyzer = CausalDiscoveryAnalyzer(config)
-
-# Step 1: Prepare data
-df_discovery, df_validation = analyzer.prepare_data(df)
-
-# Step 2: Create data matrix  
-X_discovery = analyzer.create_data_matrix(df_discovery)
-
-# Step 3: Add domain knowledge
-background_knowledge = analyzer.create_background_knowledge()
-
-# Step 4: Run PC algorithm
-causal_graph = analyzer.run_pc_algorithm(X_discovery, background_knowledge)
-
-# Step 5: Bootstrap analysis
-bootstrap_results = analyzer.bootstrap_analysis(X_discovery)
-
-# Step 6: Analyze stability
-stability_analysis = analyzer.analyze_stability(bootstrap_results)
-```
-
-### Batch Comparison
-
-```python
-configs = {
-    "liberal": CausalDiscoveryConfig(alpha=0.1),
-    "standard": CausalDiscoveryConfig(alpha=0.05), 
-    "strict": CausalDiscoveryConfig(alpha=0.01)
+# Define your datasets
+dataset_paths = {
+    "dataset_1": "data/survey_wearable_data_1.csv",
+    "dataset_2": "data/survey_wearable_data_2.csv"
 }
 
-results = {}
-for name, config in configs.items():
-    results[name] = run_causal_discovery(df, config)
-    
-# Compare edge counts and stability across configurations
-```
-
-### Custom Independence Tests
-
-```python
-# Future extension point for other independence tests
-config = CausalDiscoveryConfig(
-    independence_test="kci",  # Kernel-based conditional independence
-    alpha=0.05
+# Run analysis
+results = run_pc_analysis(
+    dataset_paths,
+    n_bootstrap=100,      # Bootstrap iterations
+    sample_frac=0.6,      # 60% sampling per iteration
+    alpha=0.05            # Significance level
 )
 ```
 
-## Interpretation Guidelines
+## Main Functions
+
+### Complete Analysis
+
+```python
+run_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, alpha=0.05)
+```
+Runs full analysis across multiple datasets and compares results.
+
+### Single Dataset Analysis
+
+```python
+from causal_discovery import analyze_single_dataset
+
+results = analyze_single_dataset(
+    filepath="data/survey_wearable_data.csv",
+    dataset_name="my_dataset",
+    n_bootstrap=100
+)
+```
+
+### Component Functions
+
+```python
+from causal_discovery import (
+    load_and_prepare_data,      # Load and clean dataset
+    prepare_variables,           # Select features and create data matrix
+    create_background_knowledge, # Add domain constraints
+    bootstrap_pc_analysis        # Run bootstrap analysis
+)
+```
+
+## Data Requirements
+
+Your CSV files should contain:
+- **Required columns**: `promis_dep_sum`, `promis_anx_sum`, `pid`
+- **Sensor features**: Variables ending in `_mean` or `_std`
+- The system automatically filters invalid depression/anxiety scores (keeps 4-20 range)
+
+## Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `n_bootstrap` | 100 | Number of bootstrap iterations |
+| `sample_frac` | 0.6 | Fraction of data sampled per iteration |
+| `alpha` | 0.05 | Significance level for independence tests |
+
+## Domain Constraints
+
+The system automatically applies two constraint types:
+
+1. **No mean↔std correlations**: Prevents `sensor_mean ↔ sensor_std` edges for the same sensor
+2. **Directional enforcement**: Requires `sensor → outcome` direction (sensors can only cause outcomes, not vice versa)
+
+## Output Interpretation
 
 ### Stability Assessment
 
-| Stability | Interpretation | Action |
-|-----------|----------------|---------|
-| **Strong (≥70%)** | Robust relationship likely | Include in final model |
-| **Moderate (50-69%)** | Potentially real, needs validation | Test on validation set |
-| **Weak (30-49%)** | Uncertain relationship | Requires more data |
-| **Unstable (<30%)** | Likely spurious | Exclude from model |
+Results show how often each edge appears across bootstrap iterations:
 
-### Edge Types
-
-- **Directed (→)**: Causal relationship with clear direction
-- **Undirected (—)**: Association without clear causal direction
-- **Absent**: No significant relationship detected
-
-### Clinical Interpretation
-
-**Example findings:**
-- `rem_std → promis_dep_sum` (Strong, 80%): REM sleep variability predicts depression severity
-- `hr_average_std → promis_anx_sum` (Moderate, 65%): Heart rate variability associated with anxiety
-- `promis_anx_sum → promis_dep_sum` (Strong, 85%): Anxiety symptoms predict depression symptoms
-
-## Validation Workflow
-
-1. **Discovery Phase**: Run causal discovery on discovery set
-2. **Stability Assessment**: Evaluate bootstrap stability of key edges
-3. **Validation Phase**: Test stable relationships on held-out validation set
-4. **Clinical Validation**: Confirm relationships align with domain knowledge
-5. **Replication**: Test findings on independent datasets
-
-## Troubleshooting
-
-### Common Issues
-
-**Empty Results:**
-- Check data has sufficient samples and features
-- Verify data contains target variables (`promis_dep_sum`, `promis_anx_sum`)
-- Ensure features have meaningful variance
-
-**Low Stability:**
-- Increase bootstrap iterations (`n_bootstrap`)
-- Adjust sample fraction (`bootstrap_sample_frac`)
-- Check for overfitting with too many features
-
-**Algorithm Failures:**
-- Reduce alpha for less strict testing
-- Check for perfect correlations or constant features
-- Ensure data is properly normalized
-
-**Memory Issues:**
-- Limit maximum samples (`max_samples`)
-- Reduce bootstrap iterations
-- Process in smaller batches
-
-### Debugging
-
-Enable detailed logging:
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
+```
+rem_std → promis_dep_sum: 82/100 (82.0%) - STRONG
+deep_std → promis_dep_sum: 67/100 (67.0%) - MODERATE
+promis_anx_sum ↔ promis_dep_sum: 91/100 (91.0%) - STRONG
 ```
 
-Check intermediate results:
-```python
-# Access discovery data
-print(f"Discovery shape: {analyzer.X_discovery.shape}")
-print(f"Features: {analyzer.feature_names}")
+**Stability levels:**
+- **STRONG** (≥70%): Robust relationship
+- **MODERATE** (50-69%): Potentially real, needs validation
+- **WEAK** (30-49%): Uncertain
+- **UNSTABLE** (<30%): Likely spurious
 
-# Check edge extraction
-edges = analyzer.extract_edges(causal_graph.G, analyzer.feature_names)
-print(f"Extracted {len(edges)} edges")
+### Consistency Across Datasets
+
+When comparing multiple datasets:
+
+```
+Consistency Assessment:
+  rem_std → depression: CONSISTENT across datasets
+    dataset_1: 82% (STRONG)
+    dataset_2: 79% (STRONG)
 ```
 
-## Best Practices
+**Consistency criteria:**
+- **HIGH**: Stability difference < 20%
+- **MODERATE**: Stability difference 20-40%
+- **LOW**: Stability difference > 40%
 
-### Data Preparation
-- Use properly preprocessed wearable data with consistent time windows
-- Ensure adequate sample size (>200 observations recommended)
-- Check for missing data and outliers
-- Consider standardization for mixed-scale variables
+## Example: Testing the Code
 
-### Statistical Considerations
-- Choose alpha based on multiple testing burden
-- Use bootstrap for stability, not just single-run results  
-- Validate key findings on independent data
-- Consider effect sizes, not just statistical significance
+```python
+from test_causal_discovery import run_all_tests, main
 
-### Domain Knowledge
-- Include biologically plausible constraints
-- Prevent obviously spurious relationships
-- Allow for bidirectional psychological relationships
-- Consider temporal precedence in constraint design
+# Run quick tests (10 bootstrap iterations)
+run_all_tests()
 
-### Interpretation
-- Focus on stable, replicable relationships
-- Consider clinical significance of effect sizes
-- Validate against existing literature
-- Use results for hypothesis generation, not definitive causation
+# Run full analysis (100 iterations)
+main()
+```
 
-## Extensions
+## Customizing Key Edges
 
-The modular design supports extensions:
+Track specific relationships of interest:
 
-- **Additional Independence Tests**: KCI, mutual information
-- **Score-Based Methods**: GES, GIES for mixed data types
-- **Constraint Integration**: Time-based, experimental constraints
-- **Validation Methods**: Cross-validation, permutation testing
-- **Visualization**: Interactive graph exploration
-- **Effect Size Estimation**: Quantify relationship strengths
+```python
+# Default key edges tracked:
+key_edges = [
+    ("rem_std", "promis_dep_sum"),
+    ("deep_std", "promis_dep_sum"),
+    ("promis_anx_sum", "promis_dep_sum")
+]
 
-## References
+# The bootstrap_pc_analysis function counts how often these appear
+```
 
-- Spirtes, P., Glymour, C., & Scheines, R. (2000). Causation, prediction, and search.
-- Zhang, J. (2008). On the completeness of orientation rules for causal discovery in the presence of latent confounders.
-- Zheng, X., et al. (2018). DAGs with NO TEARS: Continuous optimization for structure learning.
+## How It Works
 
-## License
+1. **Data Loading**: Loads CSV, removes missing values, filters valid score ranges
+2. **Variable Selection**: Selects depression/anxiety scores + all sensor `_mean` and `_std` features
+3. **Background Knowledge**: Creates domain constraints
+4. **Bootstrap Loop**: For each iteration:
+   - Sample 60% of data randomly
+   - Run PC algorithm with constraints
+   - Track which edges appear
+5. **Stability Analysis**: Calculate frequency of edge appearance across iterations
+6. **Comparison**: Compare stability across datasets
 
-[Add your license information here]
+## Tips
+
+**Increasing Robustness:**
+- Increase `n_bootstrap` (200+ for more stable estimates)
+- Decrease `sample_frac` (0.5 for harder test)
+- Decrease `alpha` (0.01 for stricter significance)
+
+**Faster Testing:**
+- Decrease `n_bootstrap` (10-20 for quick tests)
+- Increase `sample_frac` (0.8 for easier convergence)
+
+**Finding More Edges:**
+- Increase `alpha` (0.1 for exploratory analysis)
+- Note: This may increase false positives
+
+## Common Issues
+
+**"File not found"**: Check file paths match your directory structure
+
+**"No successful iterations"**: Your data may be too small or have insufficient variance
+
+**Low stability**: Normal for weak relationships - focus on edges with >50% stability

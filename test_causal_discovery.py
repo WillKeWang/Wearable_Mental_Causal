@@ -1,242 +1,208 @@
 """
-Simple Temporal Causal Discovery Analysis
-========================================
-Direct adaptation of your notebook for the two new temporal datasets.
+Test Temporal Causal Discovery Analysis
+======================================
+Test the PC algorithm functions on temporal datasets.
 """
 
-import pandas as pd
-import numpy as np
-import random
-import warnings
-from collections import defaultdict
-from tqdm import tqdm
-from contextlib import redirect_stdout, redirect_stderr
-import os
+from causal_discovery import (
+    load_and_prepare_data,
+    prepare_variables,
+    create_background_knowledge,
+    bootstrap_pc_analysis,
+    analyze_single_dataset,
+    run_temporal_pc_analysis,
+    print_results,
+    compare_temporal_results
+)
 
-from causallearn.search.ConstraintBased.PC import pc
-from causallearn.utils.cit import fisherz
-from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
-from causallearn.graph.GraphNode import GraphNode
 
-warnings.filterwarnings('ignore')
-
-def load_and_prepare_data(filepath, dataset_name):
-    """Load and prepare data exactly like the original notebook."""
-    print(f"\nLoading {dataset_name}: {filepath}")
+def test_data_loading():
+    """Test data loading and preparation."""
+    print("="*60)
+    print("TEST 1: Data Loading and Preparation")
+    print("="*60)
     
-    # Try different file extensions
-    for ext in ['', '.csv', '.txt']:
-        try_path = filepath + ext if not filepath.endswith(('.csv', '.txt')) else filepath
-        if os.path.exists(try_path):
-            df = pd.read_csv(try_path)
-            break
+    filepath = "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv"
+    df = load_and_prepare_data(filepath, "test_dataset")
+    
+    if df is not None:
+        print("✓ Data loaded successfully")
+        print(f"✓ Shape: {df.shape}")
+        print(f"✓ Required columns present: {'promis_dep_sum' in df.columns and 'promis_anx_sum' in df.columns}")
     else:
-        print(f"File not found: {filepath}")
+        print("✗ Data loading failed")
+    
+    return df
+
+
+def test_variable_preparation(df):
+    """Test variable preparation."""
+    print("\n" + "="*60)
+    print("TEST 2: Variable Preparation")
+    print("="*60)
+    
+    if df is not None:
+        feature_names, X = prepare_variables(df)
+        print(f"✓ Prepared {len(feature_names)} features")
+        print(f"✓ Data matrix shape: {X.shape}")
+        print(f"✓ Base vars included: {'promis_dep_sum' in feature_names and 'promis_anx_sum' in feature_names}")
+        return feature_names, X
+    else:
+        print("✗ Cannot test - no data available")
+        return None, None
+
+
+def test_background_knowledge(feature_names):
+    """Test background knowledge creation."""
+    print("\n" + "="*60)
+    print("TEST 3: Background Knowledge Creation")
+    print("="*60)
+    
+    if feature_names is not None:
+        base_vars = ["promis_dep_sum", "promis_anx_sum"]
+        bk = create_background_knowledge(feature_names, base_vars)
+        print("✓ Background knowledge created successfully")
+        return bk
+    else:
+        print("✗ Cannot test - no feature names available")
         return None
-    
-    print(f"Original shape: {df.shape}")
-    
-    # Same cleaning as original notebook
-    cleaned_df = df.dropna(axis=0, how='any')
-    cleaned_df = cleaned_df[cleaned_df['promis_dep_sum'] >= 4]
-    cleaned_df = cleaned_df[cleaned_df['promis_anx_sum'] >= 4]
-    cleaned_df = cleaned_df[cleaned_df['promis_dep_sum'] <= 20]
-    cleaned_df = cleaned_df[cleaned_df['promis_anx_sum'] <= 20]
-    
-    print(f"After cleaning: {cleaned_df.shape}")
-    print(f"Unique users: {cleaned_df['pid'].nunique()}")
-    
-    return cleaned_df
 
-def create_background_knowledge(feature_names, base_vars):
-    """Create background knowledge - same as original notebook."""
-    bk = BackgroundKnowledge()
-    nodes = [GraphNode(name) for name in feature_names]
-    name_to_node = {n.get_name(): n for n in nodes}
-    
-    # Forbid mean ↔ std connections for same sensor
-    sensor_features = [name for name in feature_names if name not in base_vars]
-    processed_bases = set()
-    
-    for feature in sensor_features:
-        if feature.endswith('_mean'):
-            base_name = feature.replace('_mean', '')
-            std_feature = f"{base_name}_std"
-            
-            if std_feature in sensor_features and base_name not in processed_bases:
-                bk.add_forbidden_by_node(name_to_node[feature], name_to_node[std_feature])
-                bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
-                processed_bases.add(base_name)
-    
-    # Require sensor → outcome directions
-    outcome_vars = [name for name in feature_names if name in base_vars]
-    for sensor_feature in sensor_features:
-        for outcome_var in outcome_vars:
-            bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
-    
-    return bk
 
-def bootstrap_analysis(X, feature_names, base_vars, n_bootstrap=100):
-    """Bootstrap analysis - same as original notebook."""
-    edge_counts = defaultdict(int)
-    successful_iterations = 0
+def test_bootstrap_analysis(X, feature_names):
+    """Test bootstrap analysis with small sample."""
+    print("\n" + "="*60)
+    print("TEST 4: Bootstrap Analysis (small sample)")
+    print("="*60)
     
-    # Track key edges
-    rem_dep_count = 0
-    deep_dep_count = 0
-    anxiety_dep_count = 0
-    
-    for i in tqdm(range(n_bootstrap), desc="Bootstrap"):
-        n_sample = int(X.shape[0] * 0.6)  # Same 60% sampling
-        sample_indices = random.sample(range(X.shape[0]), n_sample)
-        X_bootstrap = X[sample_indices, :]
+    if X is not None and feature_names is not None:
+        base_vars = ["promis_dep_sum", "promis_anx_sum"]
+        results = bootstrap_pc_analysis(
+            X, feature_names, base_vars, 
+            n_bootstrap=10,  # Small sample for testing
+            sample_frac=0.6,
+            alpha=0.05
+        )
         
-        try:
-            # Create background knowledge
-            bk = create_background_knowledge(feature_names, base_vars)
-            
-            # Run PC algorithm (same parameters as notebook)
-            with open(os.devnull, 'w') as devnull:
-                with redirect_stdout(devnull), redirect_stderr(devnull):
-                    cg = pc(
-                        data=X_bootstrap,
-                        alpha=0.05,
-                        indep_test=fisherz,
-                        stable=True,
-                        uc_rule=0,
-                        background_knowledge=bk,
-                        node_names=feature_names,
-                        verbose=False
-                    )
-            
-            if cg is None or cg.G is None:
-                continue
-            
-            # Extract edges (same as notebook)
-            graph = cg.G
-            n_nodes = len(feature_names)
-            adj_matrix = graph.graph
-            edges_this_iteration = []
-            
-            for i_node in range(n_nodes):
-                for j_node in range(i_node + 1, n_nodes):
-                    from_var = feature_names[i_node]
-                    to_var = feature_names[j_node]
-                    
-                    if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
-                        if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
-                            # Undirected
-                            edge_key = tuple(sorted([from_var, to_var]))
-                        elif adj_matrix[i_node, j_node] != 0:
-                            # Directed i -> j
-                            edge_key = (from_var, to_var)
-                        elif adj_matrix[j_node, i_node] != 0:
-                            # Directed j -> i
-                            edge_key = (to_var, from_var)
-                        
-                        edge_counts[edge_key] += 1
-                        edges_this_iteration.append(edge_key)
-            
-            # Count key edges (same as notebook)
-            if ('rem_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['rem_std', 'promis_dep_sum'])) in edges_this_iteration:
-                rem_dep_count += 1
-            if ('deep_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['deep_std', 'promis_dep_sum'])) in edges_this_iteration:
-                deep_dep_count += 1
-            if ('promis_anx_sum', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['promis_anx_sum', 'promis_dep_sum'])) in edges_this_iteration:
-                anxiety_dep_count += 1
-                
-            successful_iterations += 1
-            
-        except:
-            continue
-    
-    return {
-        'edge_counts': edge_counts,
-        'successful_iterations': successful_iterations,
-        'rem_dep_count': rem_dep_count,
-        'deep_dep_count': deep_dep_count,
-        'anxiety_dep_count': anxiety_dep_count
-    }
-
-def analyze_dataset(filepath, dataset_name):
-    """Analyze a single dataset."""
-    # Load and prepare data
-    df = load_and_prepare_data(filepath, dataset_name)
-    if df is None:
+        print(f"✓ Bootstrap completed: {results['successful_iterations']}/10 successful")
+        print(f"✓ Found {len(results['edge_counts'])} unique edges")
+        print(f"✓ Key edge counts tracked:")
+        print(f"    - rem_std → depression: {results['rem_dep_count']}")
+        print(f"    - deep_std → depression: {results['deep_dep_count']}")
+        print(f"    - anxiety ↔ depression: {results['anxiety_dep_count']}")
+        
+        return results
+    else:
+        print("✗ Cannot test - no data or feature names available")
         return None
+
+
+def test_single_dataset_analysis():
+    """Test complete single dataset analysis."""
+    print("\n" + "="*60)
+    print("TEST 5: Single Dataset Analysis")
+    print("="*60)
     
-    # Same variable selection as notebook
-    base_vars = ["promis_dep_sum", "promis_anx_sum"]
-    metric_cols = [c for c in df.columns if c.endswith("_mean") or c.endswith("_std")]
-    cols = base_vars + metric_cols
-    cols = [c for c in cols if not c.startswith("total_")]  # Remove total_ variables
+    filepath = "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv"
+    results = analyze_single_dataset(
+        filepath, 
+        "1w_to_5w_after",
+        n_bootstrap=10,  # Small sample for testing
+        sample_frac=0.6,
+        alpha=0.05
+    )
     
-    print(f"Selected {len(cols)} variables")
-    
-    # Create data matrix
-    X = (df[cols]
-         .apply(pd.to_numeric, errors="coerce")
-         .dropna()
-         .to_numpy())
-    
-    print(f"Analysis matrix: {X.shape[0]} rows × {X.shape[1]} variables")
-    
-    # Run bootstrap analysis
-    results = bootstrap_analysis(X, cols, base_vars, n_bootstrap=100)
+    if results:
+        print("✓ Single dataset analysis completed")
+        print_results(results, "1w_to_5w_after")
+    else:
+        print("✗ Single dataset analysis failed")
     
     return results
 
-def main():
-    """Main analysis function."""
-    print("="*60)
-    print("TEMPORAL CAUSAL DISCOVERY ANALYSIS")
+
+def test_full_temporal_analysis():
+    """Test full temporal analysis with multiple datasets."""
+    print("\n" + "="*60)
+    print("TEST 6: Full Temporal Analysis")
     print("="*60)
     
-    # Dataset paths
-    datasets = {
+    dataset_paths = {
         "1w_to_5w_after": "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv",
         "6w_to_2w_before": "data/preprocessed/full_run/6w_to_2w_before/survey_wearable_42d_before_to_14d_before_baseline_adj_full.csv"
     }
     
-    results = {}
+    results = run_temporal_pc_analysis(
+        dataset_paths,
+        n_bootstrap=10,  # Small sample for testing
+        sample_frac=0.6,
+        alpha=0.05
+    )
     
-    # Analyze each dataset
-    for name, path in datasets.items():
-        results[name] = analyze_dataset(path, name)
+    if all(results.values()):
+        print("\n✓ Full temporal analysis completed successfully")
+    else:
+        print("\n✗ Some datasets failed to analyze")
     
-    # Compare results
-    print(f"\n{'='*60}")
-    print("RESULTS COMPARISON")
-    print(f"{'='*60}")
+    return results
+
+
+def run_all_tests():
+    """Run all tests."""
+    print("="*60)
+    print("RUNNING ALL TESTS")
+    print("="*60)
     
-    for name, result in results.items():
-        if result:
-            total = result['successful_iterations']
-            rem_dep = result['rem_dep_count']
-            deep_dep = result['deep_dep_count']
-            anx_dep = result['anxiety_dep_count']
-            
-            print(f"\n{name}:")
-            print(f"  rem_std → promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-            print(f"  deep_std → promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
-            print(f"  promis_anx_sum ↔ promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
+    # Test 1: Data loading
+    df = test_data_loading()
     
-    # Consistency check
-    if len([r for r in results.values() if r]) >= 2:
-        print(f"\nConsistency Assessment:")
-        valid_results = {k: v for k, v in results.items() if v}
-        
-        rem_stabilities = [v['rem_dep_count']/v['successful_iterations'] for v in valid_results.values()]
-        rem_consistency = max(rem_stabilities) - min(rem_stabilities) < 0.2
-        
-        print(f"  rem_std → depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
-        
-        for i, (name, stability) in enumerate(zip(valid_results.keys(), rem_stabilities)):
-            assessment = "STRONG" if stability >= 0.7 else "MODERATE" if stability >= 0.5 else "WEAK"
-            print(f"    {name}: {stability:.1%} ({assessment})")
+    # Test 2: Variable preparation
+    feature_names, X = test_variable_preparation(df)
+    
+    # Test 3: Background knowledge
+    bk = test_background_knowledge(feature_names)
+    
+    # Test 4: Bootstrap analysis
+    results = test_bootstrap_analysis(X, feature_names)
+    
+    # Test 5: Single dataset analysis
+    single_results = test_single_dataset_analysis()
+    
+    # Test 6: Full temporal analysis
+    full_results = test_full_temporal_analysis()
+    
+    print("\n" + "="*60)
+    print("ALL TESTS COMPLETED")
+    print("="*60)
+
+
+def main():
+    """
+    Run the actual analysis with full bootstrap iterations.
+    Use this after tests pass to run the real analysis.
+    """
+    print("="*60)
+    print("RUNNING FULL TEMPORAL PC ANALYSIS")
+    print("="*60)
+    
+    dataset_paths = {
+        "1w_to_5w_after": "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv",
+        "6w_to_2w_before": "data/preprocessed/full_run/6w_to_2w_before/survey_wearable_42d_before_to_14d_before_baseline_adj_full.csv"
+    }
+    
+    # Run with full bootstrap iterations
+    results = run_temporal_pc_analysis(
+        dataset_paths,
+        n_bootstrap=100,
+        sample_frac=0.6,
+        alpha=0.05
+    )
+    
+    return results
+
 
 if __name__ == "__main__":
+    # Run tests first
+    run_all_tests()
+    
+    # run full analysis
     main()
