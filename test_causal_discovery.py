@@ -9,7 +9,6 @@ from causal_discovery import (
     prepare_variables,
     get_baseline_data,
     create_background_knowledge,
-    bootstrap_pc_analysis,
     bootstrap_pc_analysis_by_pid,
     analyze_single_dataset,
     run_temporal_pc_analysis,
@@ -63,19 +62,14 @@ def test_variable_preparation(df):
     print("="*60)
     
     if df is not None:
-        # Test without PID
-        feature_names, X = prepare_variables(df, keep_pid=False)
-        print(f"✓ Prepared {len(feature_names)} features (without PID)")
-        print(f"✓ Data matrix shape: {X.shape}")
-        
         # Test with PID
         feature_names_pid, X_pid, pids = prepare_variables(df, keep_pid=True)
         print(f"✓ Prepared {len(feature_names_pid)} features (with PID)")
         print(f"✓ Data matrix shape: {X_pid.shape}")
         print(f"✓ PIDs array shape: {pids.shape}")
-        print(f"✓ Base vars included: {'promis_dep_sum' in feature_names and 'promis_anx_sum' in feature_names}")
+        print(f"✓ Base vars included: {'promis_dep_sum' in feature_names_pid and 'promis_anx_sum' in feature_names_pid}")
         
-        return feature_names, X
+        return feature_names_pid, X_pid
     else:
         print("✗ Cannot test - no data available")
         return None, None
@@ -97,38 +91,10 @@ def test_background_knowledge(feature_names):
         return None
 
 
-def test_bootstrap_analysis_rowlevel(X, feature_names):
-    """Test row-level bootstrap analysis with small sample."""
-    print("\n" + "="*60)
-    print("TEST 5: Bootstrap Analysis (Row-level, small sample)")
-    print("="*60)
-    
-    if X is not None and feature_names is not None:
-        base_vars = ["promis_dep_sum", "promis_anx_sum"]
-        results = bootstrap_pc_analysis(
-            X, feature_names, base_vars, 
-            n_bootstrap=10,  # Small sample for testing
-            sample_frac=0.6,
-            alpha=0.05
-        )
-        
-        print(f"✓ Bootstrap completed: {results['successful_iterations']}/10 successful")
-        print(f"✓ Found {len(results['edge_counts'])} unique edges")
-        print(f"✓ Key edge counts tracked:")
-        print(f"    - rem_std → depression: {results['rem_dep_count']}")
-        print(f"    - deep_std → depression: {results['deep_dep_count']}")
-        print(f"    - anxiety ↔ depression: {results['anxiety_dep_count']}")
-        
-        return results
-    else:
-        print("✗ Cannot test - no data or feature names available")
-        return None
-
-
 def test_bootstrap_analysis_pidlevel(df):
     """Test PID-level bootstrap analysis with baseline surveys."""
     print("\n" + "="*60)
-    print("TEST 6: Bootstrap Analysis (PID-level baseline, small sample)")
+    print("TEST 5: Bootstrap Analysis (PID-level baseline, small sample)")
     print("="*60)
     
     if df is not None:
@@ -161,7 +127,7 @@ def test_bootstrap_analysis_pidlevel(df):
 def test_single_dataset_analysis_pidlevel():
     """Test complete single dataset analysis with PID-level bootstrapping."""
     print("\n" + "="*60)
-    print("TEST 7: Single Dataset Analysis (PID-level baseline)")
+    print("TEST 6: Single Dataset Analysis (PID-level baseline)")
     print("="*60)
     
     filepath = "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv"
@@ -187,7 +153,7 @@ def test_single_dataset_analysis_pidlevel():
 def test_full_temporal_analysis_pidlevel():
     """Test full temporal analysis with PID-level bootstrapping."""
     print("\n" + "="*60)
-    print("TEST 8: Full Temporal Analysis (PID-level baseline)")
+    print("TEST 7: Full Temporal Analysis (PID-level baseline)")
     print("="*60)
     
     dataset_paths = {
@@ -216,7 +182,7 @@ def test_full_temporal_analysis_pidlevel():
 def run_all_tests():
     """Run all tests."""
     print("="*60)
-    print("RUNNING ALL TESTS")
+    print("RUNNING ALL TESTS (PID-LEVEL BOOTSTRAPPING)")
     print("="*60)
     
     # Test 1: Data loading
@@ -231,16 +197,13 @@ def run_all_tests():
     # Test 4: Background knowledge
     bk = test_background_knowledge(feature_names)
     
-    # Test 5: Row-level bootstrap analysis
-    results_row = test_bootstrap_analysis_rowlevel(X, feature_names)
-    
-    # Test 6: PID-level bootstrap analysis
+    # Test 5: PID-level bootstrap analysis
     results_pid = test_bootstrap_analysis_pidlevel(df)
     
-    # Test 7: Single dataset analysis (PID-level)
+    # Test 6: Single dataset analysis (PID-level)
     single_results = test_single_dataset_analysis_pidlevel()
     
-    # Test 8: Full temporal analysis (PID-level)
+    # Test 7: Full temporal analysis (PID-level)
     full_results = test_full_temporal_analysis_pidlevel()
     
     print("\n" + "="*60)
@@ -277,54 +240,9 @@ def main():
     return results
 
 
-def compare_methods():
-    """
-    Compare row-level vs PID-level bootstrapping.
-    """
-    print("="*60)
-    print("COMPARING BOOTSTRAPPING METHODS")
-    print("="*60)
-    
-    filepath = "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv"
-    
-    print("\n--- Method 1: Row-level bootstrapping ---")
-    results_row = analyze_single_dataset(
-        filepath, "1w_to_5w_after",
-        n_bootstrap=50,
-        sample_frac=0.6,
-        alpha=0.05,
-        use_pid_bootstrap=False
-    )
-    print_results(results_row, "Row-level", min_frequency=0.2)
-    
-    print("\n--- Method 2: PID-level bootstrapping (baseline) ---")
-    results_pid = analyze_single_dataset(
-        filepath, "1w_to_5w_after",
-        n_bootstrap=50,
-        sample_frac=0.6,
-        alpha=0.05,
-        use_pid_bootstrap=True,
-        use_baseline=True
-    )
-    print_results(results_pid, "PID-level (baseline)", min_frequency=0.2)
-    
-    print("\n" + "="*60)
-    print("COMPARISON SUMMARY")
-    print("="*60)
-    
-    if results_row and results_pid:
-        print("\nREM → Depression:")
-        print(f"  Row-level: {results_row['rem_dep_count']}/{results_row['successful_iterations']} = {results_row['rem_dep_count']/results_row['successful_iterations']:.1%}")
-        print(f"  PID-level: {results_pid['rem_dep_count']}/{results_pid['successful_iterations']} = {results_pid['rem_dep_count']/results_pid['successful_iterations']:.1%}")
-
-
 if __name__ == "__main__":
     # Run tests first
     run_all_tests()
-    
-    # Optional: Compare methods
-    print("\n\n")
-    compare_methods()
     
     # Run full analysis
     print("\n\n")

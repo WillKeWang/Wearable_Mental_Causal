@@ -86,7 +86,7 @@ def prepare_variables(df, keep_pid=False):
     
     X = df_clean[cols].to_numpy()
     
-    print(f"Analysis matrix: {X.shape[0]} rows × {X.shape[1]} variables")
+    print(f"Analysis matrix: {X.shape[0]} rows Ã— {X.shape[1]} variables")
     
     if keep_pid:
         pids = df_clean['pid'].to_numpy()
@@ -358,7 +358,7 @@ def create_background_knowledge(feature_names, base_vars):
     nodes = [GraphNode(name) for name in feature_names]
     name_to_node = {n.get_name(): n for n in nodes}
     
-    # Forbid mean ↔ std connections for same sensor
+    # Forbid mean â†” std connections for same sensor
     sensor_features = [name for name in feature_names if name not in base_vars]
     processed_bases = set()
     
@@ -372,7 +372,7 @@ def create_background_knowledge(feature_names, base_vars):
                 bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
                 processed_bases.add(base_name)
     
-    # Require sensor → outcome directions
+    # Require sensor â†’ outcome directions
     outcome_vars = [name for name in feature_names if name in base_vars]
     for sensor_feature in sensor_features:
         for outcome_var in outcome_vars:
@@ -440,22 +440,23 @@ def print_results(results, dataset_name, min_frequency=0.1):
         anx_dep = results['anxiety_dep_count']
         
         print(f"\n{dataset_name}:")
-        print(f"  rem_std → promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-        print(f"  deep_std → promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
-        print(f"  promis_anx_sum ↔ promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
+        print(f"  rem_std â†’ promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
+        print(f"  deep_std â†’ promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
+        print(f"  promis_anx_sum â†” promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
         
         # Print all significant edges
         print_all_edges(results, min_frequency=min_frequency)
 
 
-def print_all_edges(results, min_frequency=0.1):
+def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     """
     Print all edges that appeared across bootstrap iterations.
-    Highlights edges pointing to depression or anxiety.
+    Filters edges based on temporal direction if dataset_type is specified.
     
     Args:
         results: Dictionary with analysis results
         min_frequency: Minimum frequency threshold to display (default 0.1 = 10%)
+        dataset_type: 'before' or 'after' to filter edges by temporal direction, None for no filtering
     """
     if not results or 'edge_counts' not in results:
         return
@@ -469,11 +470,60 @@ def print_all_edges(results, min_frequency=0.1):
                         if count / total >= min_frequency}
     
     if not significant_edges:
-        print(f"\nNo edges appeared in ≥{min_frequency*100:.0f}% of iterations")
+        print(f"\nNo edges appeared in >={min_frequency*100:.0f}% of iterations")
         return
     
-    # Sort edges by frequency (descending)
-    sorted_edges = sorted(significant_edges.items(), key=lambda x: x[1], reverse=True)
+    # Helper function to check if variable is a wearable metric
+    def is_wearable_var(var):
+        return var not in outcome_vars and (var.endswith('_mean') or var.endswith('_std'))
+    
+    # Helper function to check if edge should be printed based on temporal direction
+    def should_print_edge(edge, dataset_type):
+        if dataset_type is None:
+            return True
+        
+        # For undirected edges (sorted tuple), always print
+        if isinstance(edge, tuple) and len(edge) == 2 and edge[0] > edge[1]:
+            # This is an undirected edge (sorted tuple)
+            return True
+        
+        # For directed edges
+        if isinstance(edge, tuple) and len(edge) == 2:
+            from_var, to_var = edge
+            
+            # Check if this is a wearable-survey edge
+            from_is_wearable = is_wearable_var(from_var)
+            to_is_wearable = is_wearable_var(to_var)
+            from_is_survey = from_var in outcome_vars
+            to_is_survey = to_var in outcome_vars
+            
+            # If not a wearable-survey edge, always print
+            if not ((from_is_wearable and to_is_survey) or (from_is_survey and to_is_wearable)):
+                return True
+            
+            # Apply temporal filtering for wearable-survey edges
+            if dataset_type == 'before':
+                # BEFORE: only print wearable → survey (edges going INTO survey)
+                return from_is_wearable and to_is_survey
+            elif dataset_type == 'after':
+                # AFTER: only print survey → wearable (edges going INTO wearable)
+                return from_is_survey and to_is_wearable
+        
+        return True
+    
+    # Sort edges by frequency (descending) and filter by temporal direction
+    filtered_edges = [(edge, count) for edge, count in significant_edges.items() 
+                     if should_print_edge(edge, dataset_type)]
+    sorted_edges = sorted(filtered_edges, key=lambda x: x[1], reverse=True)
+    
+    if not sorted_edges:
+        direction_msg = ""
+        if dataset_type == 'before':
+            direction_msg = " (after filtering for wearable → survey direction)"
+        elif dataset_type == 'after':
+            direction_msg = " (after filtering for survey → wearable direction)"
+        print(f"\nNo edges to display{direction_msg}")
+        return
     
     # Separate outcome-directed edges from others
     outcome_edges = []
@@ -482,14 +532,20 @@ def print_all_edges(results, min_frequency=0.1):
     for edge, count in sorted_edges:
         freq = count / total
         if isinstance(edge, tuple) and len(edge) == 2:
-            # Directed edge
-            from_var, to_var = edge
-            edge_str = f"{from_var} → {to_var}"
-            is_outcome = to_var in outcome_vars
+            # Check if undirected (sorted tuple with first > second alphabetically means it was sorted)
+            if edge == tuple(sorted([edge[0], edge[1]])):
+                # Undirected edge (connection exists but direction unknown)
+                edge_str = f"{edge[0]} -- {edge[1]}"
+                is_outcome = any(var in outcome_vars for var in edge)
+            else:
+                # Directed edge
+                from_var, to_var = edge
+                edge_str = f"{from_var} -> {to_var}"
+                is_outcome = to_var in outcome_vars
         else:
-            # Should be tuple (undirected)
-            edge_str = f"{edge[0]} — {edge[1]}"
-            is_outcome = any(var in outcome_vars for var in edge)
+            # Shouldn't happen, but handle gracefully
+            edge_str = str(edge)
+            is_outcome = False
         
         edge_info = (edge_str, count, freq, is_outcome)
         
@@ -498,18 +554,25 @@ def print_all_edges(results, min_frequency=0.1):
         else:
             other_edges.append(edge_info)
     
+    # Print header with temporal context
+    direction_note = ""
+    if dataset_type == 'before':
+        direction_note = " [Showing: Wearable -> Survey edges only]"
+    elif dataset_type == 'after':
+        direction_note = " [Showing: Survey -> Wearable edges only]"
+    
     # Print edges to outcome variables
     if outcome_edges:
         print(f"\n  {'='*70}")
-        print(f"  EDGES TO DEPRESSION/ANXIETY (appeared in ≥{min_frequency*100:.0f}% of iterations):")
+        print(f"  EDGES TO DEPRESSION/ANXIETY (>={min_frequency*100:.0f}%){direction_note}")
         print(f"  {'='*70}")
         for edge_str, count, freq, _ in outcome_edges:
-            print(f"  ★ {edge_str}: {count}/{total} ({freq*100:.1f}%)")
+            print(f"  * {edge_str}: {count}/{total} ({freq*100:.1f}%)")
     
     # Print other edges
     if other_edges:
         print(f"\n  {'='*70}")
-        print(f"  OTHER EDGES (appeared in ≥{min_frequency*100:.0f}% of iterations):")
+        print(f"  OTHER EDGES (>={min_frequency*100:.0f}%){direction_note}")
         print(f"  {'='*70}")
         for edge_str, count, freq, _ in other_edges:
             print(f"    {edge_str}: {count}/{total} ({freq*100:.1f}%)")
@@ -517,10 +580,11 @@ def print_all_edges(results, min_frequency=0.1):
     # Summary statistics
     print(f"\n  Summary:")
     print(f"    Total unique edges found: {len(edge_counts)}")
-    print(f"    Edges ≥{min_frequency*100:.0f}% frequency: {len(significant_edges)}")
+    print(f"    Edges >={min_frequency*100:.0f}% frequency: {len(significant_edges)}")
+    if dataset_type:
+        print(f"    Edges displayed after temporal filtering: {len(sorted_edges)}")
     print(f"    Edges to outcomes: {len(outcome_edges)}")
     print(f"    Other edges: {len(other_edges)}")
-
 
 def compare_temporal_results(results_dict, min_frequency=0.1):
     """
@@ -548,7 +612,7 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
         rem_stabilities = [v['rem_dep_count']/v['successful_iterations'] for v in valid_results.values()]
         rem_consistency = max(rem_stabilities) - min(rem_stabilities) < 0.2
         
-        print(f"  rem_std → depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
+        print(f"  rem_std â†’ depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
         
         for i, (name, stability) in enumerate(zip(valid_results.keys(), rem_stabilities)):
             assessment = "STRONG" if stability >= 0.7 else "MODERATE" if stability >= 0.5 else "WEAK"
@@ -602,13 +666,13 @@ if __name__ == "__main__":
     }
     
     # Run analysis with PID-level bootstrapping on baseline surveys
-    # min_frequency=0.1 means only show edges that appear in ≥10% of iterations
+    # min_frequency=0.1 means only show edges that appear in â‰¥10% of iterations
     results = run_temporal_pc_analysis(
         dataset_paths,
         n_bootstrap=100,
-        sample_frac=0.6,
+        sample_frac=0.5,
         alpha=0.05,
         use_pid_bootstrap=True,
         use_baseline=True,
-        min_frequency=0.1  # Show edges appearing in ≥10% of bootstrap samples
+        min_frequency=0.1  # Show edges appearing in â‰¥10% of bootstrap samples
     )
