@@ -28,12 +28,12 @@ def test_data_loading():
     df = load_and_prepare_data(filepath, "test_dataset")
     
     if df is not None:
-        print("✓ Data loaded successfully")
-        print(f"✓ Shape: {df.shape}")
-        print(f"✓ Required columns present: {'promis_dep_sum' in df.columns and 'promis_anx_sum' in df.columns}")
-        print(f"✓ PID column present: {'pid' in df.columns}")
+        print("[PASS] Data loaded successfully")
+        print(f"[PASS] Shape: {df.shape}")
+        print(f"[PASS] Required columns present: {'promis_dep_sum' in df.columns and 'promis_anx_sum' in df.columns}")
+        print(f"[PASS] PID column present: {'pid' in df.columns}")
     else:
-        print("✗ Data loading failed")
+        print("[FAIL] Data loading failed")
     
     return df
 
@@ -46,12 +46,12 @@ def test_baseline_extraction(df):
     
     if df is not None:
         baseline_df = get_baseline_data(df)
-        print(f"✓ Original data: {df.shape[0]} rows, {df['pid'].nunique()} unique PIDs")
-        print(f"✓ Baseline data: {baseline_df.shape[0]} rows")
-        print(f"✓ One row per PID: {baseline_df.shape[0] == baseline_df['pid'].nunique()}")
+        print(f"[PASS] Original data: {df.shape[0]} rows, {df['pid'].nunique()} unique PIDs")
+        print(f"[PASS] Baseline data: {baseline_df.shape[0]} rows")
+        print(f"[PASS] One row per PID: {baseline_df.shape[0] == baseline_df['pid'].nunique()}")
         return baseline_df
     else:
-        print("✗ Cannot test - no data available")
+        print("[FAIL] Cannot test - no data available")
         return None
 
 
@@ -64,14 +64,14 @@ def test_variable_preparation(df):
     if df is not None:
         # Test with PID
         feature_names_pid, X_pid, pids = prepare_variables(df, keep_pid=True)
-        print(f"✓ Prepared {len(feature_names_pid)} features (with PID)")
-        print(f"✓ Data matrix shape: {X_pid.shape}")
-        print(f"✓ PIDs array shape: {pids.shape}")
-        print(f"✓ Base vars included: {'promis_dep_sum' in feature_names_pid and 'promis_anx_sum' in feature_names_pid}")
+        print(f"[PASS] Prepared {len(feature_names_pid)} features (with PID)")
+        print(f"[PASS] Data matrix shape: {X_pid.shape}")
+        print(f"[PASS] PIDs array shape: {pids.shape}")
+        print(f"[PASS] Base vars included: {'promis_dep_sum' in feature_names_pid and 'promis_anx_sum' in feature_names_pid}")
         
         return feature_names_pid, X_pid
     else:
-        print("✗ Cannot test - no data available")
+        print("[FAIL] Cannot test - no data available")
         return None, None
 
 
@@ -84,10 +84,10 @@ def test_background_knowledge(feature_names):
     if feature_names is not None:
         base_vars = ["promis_dep_sum", "promis_anx_sum"]
         bk = create_background_knowledge(feature_names, base_vars)
-        print("✓ Background knowledge created successfully")
+        print("[PASS] Background knowledge created successfully")
         return bk
     else:
-        print("✗ Cannot test - no feature names available")
+        print("[FAIL] Cannot test - no feature names available")
         return None
 
 
@@ -111,16 +111,16 @@ def test_bootstrap_analysis_pidlevel(df):
             use_baseline=True
         )
         
-        print(f"✓ Bootstrap completed: {results['successful_iterations']}/10 successful")
-        print(f"✓ Found {len(results['edge_counts'])} unique edges")
-        print(f"✓ Key edge counts tracked:")
-        print(f"    - rem_std → depression: {results['rem_dep_count']}")
-        print(f"    - deep_std → depression: {results['deep_dep_count']}")
-        print(f"    - anxiety ↔ depression: {results['anxiety_dep_count']}")
+        print(f"[PASS] Bootstrap completed: {results['successful_iterations']}/10 successful")
+        print(f"[PASS] Found {len(results['edge_counts'])} unique edges")
+        print(f"[PASS] Key edge counts tracked:")
+        print(f"    - rem_std -> depression: {results['rem_dep_count']}")
+        print(f"    - deep_std -> depression: {results['deep_dep_count']}")
+        print(f"    - anxiety <-> depression: {results['anxiety_dep_count']}")
         
         return results
     else:
-        print("✗ Cannot test - no data available")
+        print("[FAIL] Cannot test - no data available")
         return None
 
 
@@ -142,10 +142,10 @@ def test_single_dataset_analysis_pidlevel():
     )
     
     if results:
-        print("✓ Single dataset analysis completed")
+        print("[PASS] Single dataset analysis completed")
         print_results(results, "1w_to_5w_after", min_frequency=0.2)  # 20% threshold for small test
     else:
-        print("✗ Single dataset analysis failed")
+        print("[FAIL] Single dataset analysis failed")
     
     return results
 
@@ -172,9 +172,9 @@ def test_full_temporal_analysis_pidlevel():
     )
     
     if all(results.values()):
-        print("\n✓ Full temporal analysis completed successfully")
+        print("\n[PASS] Full temporal analysis completed successfully")
     else:
-        print("\n✗ Some datasets failed to analyze")
+        print("\n[FAIL] Some datasets failed to analyze")
     
     return results
 

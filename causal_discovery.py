@@ -86,7 +86,7 @@ def prepare_variables(df, keep_pid=False):
     
     X = df_clean[cols].to_numpy()
     
-    print(f"Analysis matrix: {X.shape[0]} rows Ã— {X.shape[1]} variables")
+    print(f"Analysis matrix: {X.shape[0]} rows x {X.shape[1]} variables")
     
     if keep_pid:
         pids = df_clean['pid'].to_numpy()
@@ -140,6 +140,7 @@ def bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap=100, sample_f
         Dictionary with edge counts and key edge results
     """
     edge_counts = defaultdict(int)
+    edge_types = {}  # Track whether each edge is directed or undirected
     successful_iterations = 0
     
     # Track key edges
@@ -188,12 +189,15 @@ def bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap=100, sample_f
                         if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
                             # Undirected
                             edge_key = tuple(sorted([from_var, to_var]))
+                            edge_types[edge_key] = 'undirected'
                         elif adj_matrix[i_node, j_node] != 0:
                             # Directed i -> j
                             edge_key = (from_var, to_var)
+                            edge_types[edge_key] = 'directed'
                         elif adj_matrix[j_node, i_node] != 0:
                             # Directed j -> i
                             edge_key = (to_var, from_var)
+                            edge_types[edge_key] = 'directed'
                         
                         edge_counts[edge_key] += 1
                         edges_this_iteration.append(edge_key)
@@ -216,6 +220,7 @@ def bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap=100, sample_f
     
     return {
         'edge_counts': edge_counts,
+        'edge_types': edge_types,
         'successful_iterations': successful_iterations,
         'rem_dep_count': rem_dep_count,
         'deep_dep_count': deep_dep_count,
@@ -251,6 +256,7 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     print(f"Total participants for sampling: {n_pids}")
     
     edge_counts = defaultdict(int)
+    edge_types = {}  # Track whether each edge is directed or undirected
     successful_iterations = 0
     
     # Track key edges
@@ -308,12 +314,15 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
                         if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
                             # Undirected
                             edge_key = tuple(sorted([from_var, to_var]))
+                            edge_types[edge_key] = 'undirected'
                         elif adj_matrix[i_node, j_node] != 0:
                             # Directed i -> j
                             edge_key = (from_var, to_var)
+                            edge_types[edge_key] = 'directed'
                         elif adj_matrix[j_node, i_node] != 0:
                             # Directed j -> i
                             edge_key = (to_var, from_var)
+                            edge_types[edge_key] = 'directed'
                         
                         edge_counts[edge_key] += 1
                         edges_this_iteration.append(edge_key)
@@ -336,6 +345,7 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     
     return {
         'edge_counts': edge_counts,
+        'edge_types': edge_types,
         'successful_iterations': successful_iterations,
         'rem_dep_count': rem_dep_count,
         'deep_dep_count': deep_dep_count,
@@ -343,13 +353,15 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     }
 
 
-def create_background_knowledge(feature_names, base_vars):
+
+def create_background_knowledge(feature_names, base_vars, dataset_type=None):
     """
     Create background knowledge constraints for PC algorithm.
     
     Args:
         feature_names: List of all variable names
         base_vars: List of outcome variables (depression, anxiety)
+        dataset_type: 'before' or 'after' to enforce temporal direction, None for no temporal constraint
         
     Returns:
         BackgroundKnowledge object with constraints
@@ -358,7 +370,7 @@ def create_background_knowledge(feature_names, base_vars):
     nodes = [GraphNode(name) for name in feature_names]
     name_to_node = {n.get_name(): n for n in nodes}
     
-    # Forbid mean â†” std connections for same sensor
+    # Forbid mean -> std connections for same sensor
     sensor_features = [name for name in feature_names if name not in base_vars]
     processed_bases = set()
     
@@ -372,11 +384,24 @@ def create_background_knowledge(feature_names, base_vars):
                 bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
                 processed_bases.add(base_name)
     
-    # Require sensor â†’ outcome directions
+    # Require temporal directions based on dataset type
     outcome_vars = [name for name in feature_names if name in base_vars]
-    for sensor_feature in sensor_features:
-        for outcome_var in outcome_vars:
-            bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
+    
+    if dataset_type == 'before':
+        # BEFORE: wearable comes before survey, so wearable -> survey
+        for sensor_feature in sensor_features:
+            for outcome_var in outcome_vars:
+                bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
+    elif dataset_type == 'after':
+        # AFTER: survey comes before wearable, so survey -> wearable
+        for sensor_feature in sensor_features:
+            for outcome_var in outcome_vars:
+                bk.add_required_by_node(name_to_node[outcome_var], name_to_node[sensor_feature])
+    else:
+        # No temporal constraint specified - default to sensor -> outcome
+        for sensor_feature in sensor_features:
+            for outcome_var in outcome_vars:
+                bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
     
     return bk
 
@@ -440,12 +465,20 @@ def print_results(results, dataset_name, min_frequency=0.1):
         anx_dep = results['anxiety_dep_count']
         
         print(f"\n{dataset_name}:")
-        print(f"  rem_std â†’ promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-        print(f"  deep_std â†’ promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
-        print(f"  promis_anx_sum â†” promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
+        print(f"  rem_std -> promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
+        print(f"  deep_std -> promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
+        print(f"  promis_anx_sum <-> promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
         
-        # Print all significant edges
-        print_all_edges(results, min_frequency=min_frequency)
+        # Determine dataset type for temporal filtering
+        dataset_type = None
+        name_lower = dataset_name.lower()
+        if 'before' in name_lower:
+            dataset_type = 'before'
+        elif 'after' in name_lower:
+            dataset_type = 'after'
+        
+        # Print all significant edges with temporal filtering
+        print_all_edges(results, min_frequency=min_frequency, dataset_type=dataset_type)
 
 
 def print_all_edges(results, min_frequency=0.1, dataset_type=None):
@@ -463,6 +496,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     
     total = results['successful_iterations']
     edge_counts = results['edge_counts']
+    edge_types = results.get('edge_types', {})
     outcome_vars = ['promis_dep_sum', 'promis_anx_sum']
     
     # Filter edges by minimum frequency
@@ -478,17 +512,16 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
         return var not in outcome_vars and (var.endswith('_mean') or var.endswith('_std'))
     
     # Helper function to check if edge should be printed based on temporal direction
-    def should_print_edge(edge, dataset_type):
+    def should_print_edge(edge, edge_type, dataset_type):
         if dataset_type is None:
             return True
         
-        # For undirected edges (sorted tuple), always print
-        if isinstance(edge, tuple) and len(edge) == 2 and edge[0] > edge[1]:
-            # This is an undirected edge (sorted tuple)
+        # For undirected edges, always print
+        if edge_type == 'undirected':
             return True
         
         # For directed edges
-        if isinstance(edge, tuple) and len(edge) == 2:
+        if edge_type == 'directed' and isinstance(edge, tuple) and len(edge) == 2:
             from_var, to_var = edge
             
             # Check if this is a wearable-survey edge
@@ -503,25 +536,25 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
             
             # Apply temporal filtering for wearable-survey edges
             if dataset_type == 'before':
-                # BEFORE: only print wearable → survey (edges going INTO survey)
+                # BEFORE: only print wearable -> survey (edges going INTO survey)
                 return from_is_wearable and to_is_survey
             elif dataset_type == 'after':
-                # AFTER: only print survey → wearable (edges going INTO wearable)
+                # AFTER: only print survey -> wearable (edges going INTO wearable)
                 return from_is_survey and to_is_wearable
         
         return True
     
     # Sort edges by frequency (descending) and filter by temporal direction
     filtered_edges = [(edge, count) for edge, count in significant_edges.items() 
-                     if should_print_edge(edge, dataset_type)]
+                     if should_print_edge(edge, edge_types.get(edge, 'directed'), dataset_type)]
     sorted_edges = sorted(filtered_edges, key=lambda x: x[1], reverse=True)
     
     if not sorted_edges:
         direction_msg = ""
         if dataset_type == 'before':
-            direction_msg = " (after filtering for wearable → survey direction)"
+            direction_msg = " (after filtering for wearable -> survey direction)"
         elif dataset_type == 'after':
-            direction_msg = " (after filtering for survey → wearable direction)"
+            direction_msg = " (after filtering for survey -> wearable direction)"
         print(f"\nNo edges to display{direction_msg}")
         return
     
@@ -531,10 +564,11 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     
     for edge, count in sorted_edges:
         freq = count / total
+        edge_type = edge_types.get(edge, 'directed')
+        
         if isinstance(edge, tuple) and len(edge) == 2:
-            # Check if undirected (sorted tuple with first > second alphabetically means it was sorted)
-            if edge == tuple(sorted([edge[0], edge[1]])):
-                # Undirected edge (connection exists but direction unknown)
+            if edge_type == 'undirected':
+                # Undirected edge
                 edge_str = f"{edge[0]} -- {edge[1]}"
                 is_outcome = any(var in outcome_vars for var in edge)
             else:
@@ -586,6 +620,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     print(f"    Edges to outcomes: {len(outcome_edges)}")
     print(f"    Other edges: {len(other_edges)}")
 
+
 def compare_temporal_results(results_dict, min_frequency=0.1):
     """
     Compare results across multiple datasets.
@@ -612,7 +647,7 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
         rem_stabilities = [v['rem_dep_count']/v['successful_iterations'] for v in valid_results.values()]
         rem_consistency = max(rem_stabilities) - min(rem_stabilities) < 0.2
         
-        print(f"  rem_std â†’ depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
+        print(f"  rem_std -> depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
         
         for i, (name, stability) in enumerate(zip(valid_results.keys(), rem_stabilities)):
             assessment = "STRONG" if stability >= 0.7 else "MODERATE" if stability >= 0.5 else "WEAK"
@@ -666,7 +701,7 @@ if __name__ == "__main__":
     }
     
     # Run analysis with PID-level bootstrapping on baseline surveys
-    # min_frequency=0.1 means only show edges that appear in â‰¥10% of iterations
+    # min_frequency=0.1 means only show edges that appear in >=10% of iterations
     results = run_temporal_pc_analysis(
         dataset_paths,
         n_bootstrap=100,
@@ -674,5 +709,5 @@ if __name__ == "__main__":
         alpha=0.05,
         use_pid_bootstrap=True,
         use_baseline=True,
-        min_frequency=0.1  # Show edges appearing in â‰¥10% of bootstrap samples
+        min_frequency=0.1  # Show edges appearing in >=10% of bootstrap samples
     )
