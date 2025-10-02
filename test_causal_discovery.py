@@ -246,7 +246,7 @@ def main():
     results = run_temporal_pc_analysis(
         dataset_paths,
         n_bootstrap=100,
-        sample_frac=0.6,
+        sample_frac=0.5,
         alpha=0.05,
         use_pid_bootstrap=True,
         use_first_survey=True,
