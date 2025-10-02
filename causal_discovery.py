@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 
 def load_and_prepare_data(filepath, dataset_name):
     """
-    Load and prepare data exactly like the original notebook.
+    Load and prepare data.
     
     Args:
         filepath: Path to dataset file
@@ -46,7 +46,7 @@ def load_and_prepare_data(filepath, dataset_name):
     
     print(f"Original shape: {df.shape}")
     
-    # Same cleaning as original notebook
+    # Cleaning for valid range of PROMIS scores
     cleaned_df = df.dropna(axis=0, how='any')
     cleaned_df = cleaned_df[cleaned_df['promis_dep_sum'] >= 4]
     cleaned_df = cleaned_df[cleaned_df['promis_anx_sum'] >= 4]
@@ -79,156 +79,75 @@ def prepare_variables(df, keep_pid=False):
     
     print(f"Selected {len(cols)} variables")
     
-    # Create data matrix
-    df_clean = (df[cols + ['pid'] if keep_pid else cols]
-                .apply(pd.to_numeric, errors="coerce")
-                .dropna())
+    # Create data matrix - FIXED: Don't convert pid to numeric
+    if keep_pid:
+        # Convert only the feature columns to numeric
+        df_features = df[cols].apply(pd.to_numeric, errors="coerce")
+        # Keep pid as-is
+        df_clean = pd.concat([df_features, df[['pid']]], axis=1).dropna()
+        pids = df_clean['pid'].to_numpy()
+    else:
+        df_clean = df[cols].apply(pd.to_numeric, errors="coerce").dropna()
     
     X = df_clean[cols].to_numpy()
     
     print(f"Analysis matrix: {X.shape[0]} rows x {X.shape[1]} variables")
     
     if keep_pid:
-        pids = df_clean['pid'].to_numpy()
         return cols, X, pids
     else:
         return cols, X
 
 
-def get_baseline_data(df):
+def get_first_survey_per_participant(df):
     """
-    Extract baseline (earliest) survey for each participant.
-    Assumes df has a time-related column or uses first occurrence as baseline.
+    Extract first (earliest) survey for each participant.
+    Assumes df has a time-related column or uses first occurrence.
     
     Args:
         df: DataFrame with cleaned data
         
     Returns:
-        DataFrame with only baseline surveys (one per pid)
+        DataFrame with only first surveys (one per pid)
     """
-    # Check if there's a date or time column to determine baseline
+    # Check if there's a date or time column to determine first survey
     time_cols = [c for c in df.columns if 'date' in c.lower() or 'time' in c.lower() or 'day' in c.lower()]
     
     if time_cols:
         # Use the first time column found
         time_col = time_cols[0]
-        baseline_df = df.sort_values(time_col).groupby('pid').first().reset_index()
-        print(f"Baseline determined using '{time_col}' column")
+        first_survey_df = df.sort_values(time_col).groupby('pid').first().reset_index()
+        print(f"First survey determined using '{time_col}' column")
     else:
         # Fall back to first occurrence in dataset
-        baseline_df = df.groupby('pid').first().reset_index()
-        print("Baseline determined as first occurrence per pid")
+        first_survey_df = df.groupby('pid').first().reset_index()
+        print("First survey determined as first occurrence per pid")
     
-    print(f"Baseline surveys: {len(baseline_df)} participants")
+    print(f"First surveys: {len(first_survey_df)} participants")
     
-    return baseline_df
+    return first_survey_df
 
 
-def bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap=100, sample_frac=0.6, alpha=0.05):
+def infer_dataset_type(name_or_path):
     """
-    Run bootstrap analysis with PC algorithm (original row-based sampling).
+    Infer dataset type ('before' or 'after') from dataset name or path.
     
     Args:
-        X: Data matrix (n_samples x n_features)
-        feature_names: List of variable names
-        base_vars: List of outcome variables
-        n_bootstrap: Number of bootstrap iterations
-        sample_frac: Fraction of data to sample in each iteration
-        alpha: Significance level for independence tests
+        name_or_path: Dataset name or file path
         
     Returns:
-        Dictionary with edge counts and key edge results
+        'before', 'after', or None if cannot determine
     """
-    edge_counts = defaultdict(int)
-    edge_types = {}  # Track whether each edge is directed or undirected
-    successful_iterations = 0
-    
-    # Track key edges
-    rem_dep_count = 0
-    deep_dep_count = 0
-    anxiety_dep_count = 0
-    
-    for i in tqdm(range(n_bootstrap), desc="Bootstrap"):
-        n_sample = int(X.shape[0] * sample_frac)
-        sample_indices = random.sample(range(X.shape[0]), n_sample)
-        X_bootstrap = X[sample_indices, :]
-        
-        try:
-            # Create background knowledge
-            bk = create_background_knowledge(feature_names, base_vars)
-            
-            # Run PC algorithm (same parameters as notebook)
-            with open(os.devnull, 'w') as devnull:
-                with redirect_stdout(devnull), redirect_stderr(devnull):
-                    cg = pc(
-                        data=X_bootstrap,
-                        alpha=alpha,
-                        indep_test=fisherz,
-                        stable=True,
-                        uc_rule=0,
-                        background_knowledge=bk,
-                        node_names=feature_names,
-                        verbose=False
-                    )
-            
-            if cg is None or cg.G is None:
-                continue
-            
-            # Extract edges (same as notebook)
-            graph = cg.G
-            n_nodes = len(feature_names)
-            adj_matrix = graph.graph
-            edges_this_iteration = []
-            
-            for i_node in range(n_nodes):
-                for j_node in range(i_node + 1, n_nodes):
-                    from_var = feature_names[i_node]
-                    to_var = feature_names[j_node]
-                    
-                    if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
-                        if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
-                            # Undirected
-                            edge_key = tuple(sorted([from_var, to_var]))
-                            edge_types[edge_key] = 'undirected'
-                        elif adj_matrix[i_node, j_node] != 0:
-                            # Directed i -> j
-                            edge_key = (from_var, to_var)
-                            edge_types[edge_key] = 'directed'
-                        elif adj_matrix[j_node, i_node] != 0:
-                            # Directed j -> i
-                            edge_key = (to_var, from_var)
-                            edge_types[edge_key] = 'directed'
-                        
-                        edge_counts[edge_key] += 1
-                        edges_this_iteration.append(edge_key)
-            
-            # Count key edges (same as notebook)
-            if ('rem_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['rem_std', 'promis_dep_sum'])) in edges_this_iteration:
-                rem_dep_count += 1
-            if ('deep_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['deep_std', 'promis_dep_sum'])) in edges_this_iteration:
-                deep_dep_count += 1
-            if ('promis_anx_sum', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['promis_anx_sum', 'promis_dep_sum'])) in edges_this_iteration:
-                anxiety_dep_count += 1
-                
-            successful_iterations += 1
-            
-        except:
-            continue
-    
-    return {
-        'edge_counts': edge_counts,
-        'edge_types': edge_types,
-        'successful_iterations': successful_iterations,
-        'rem_dep_count': rem_dep_count,
-        'deep_dep_count': deep_dep_count,
-        'anxiety_dep_count': anxiety_dep_count
-    }
+    name_lower = str(name_or_path).lower()
+    if 'before' in name_lower:
+        return 'before'
+    elif 'after' in name_lower:
+        return 'after'
+    return None
 
 
-def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, sample_frac=0.6, alpha=0.05, use_baseline=True):
+def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, sample_frac=0.6, 
+                                 alpha=0.05, use_first_survey=True, dataset_type=None, verbose=False):
     """
     Run bootstrap analysis with PC algorithm, sampling at participant (pid) level.
     
@@ -239,14 +158,16 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
         n_bootstrap: Number of bootstrap iterations
         sample_frac: Fraction of participants to sample in each iteration
         alpha: Significance level for independence tests
-        use_baseline: If True, use only baseline (earliest) survey per pid
+        use_first_survey: If True, use only first (earliest) survey per pid
+        dataset_type: 'before' or 'after' to enforce temporal direction
+        verbose: If True, print warnings about edge direction corrections
         
     Returns:
         Dictionary with edge counts and key edge results
     """
-    # Get baseline data if requested
-    if use_baseline:
-        df_to_use = get_baseline_data(df)
+    # Get first survey data if requested
+    if use_first_survey:
+        df_to_use = get_first_survey_per_participant(df)
     else:
         df_to_use = df.copy()
     
@@ -254,15 +175,17 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     unique_pids = df_to_use['pid'].unique()
     n_pids = len(unique_pids)
     print(f"Total participants for sampling: {n_pids}")
+    print(f"Dataset type: {dataset_type}")
     
     edge_counts = defaultdict(int)
     edge_types = {}  # Track whether each edge is directed or undirected
     successful_iterations = 0
     
-    # Track key edges
+    # Track key edges - direction depends on dataset type
     rem_dep_count = 0
     deep_dep_count = 0
     anxiety_dep_count = 0
+    direction_corrections = 0  # Track how many edges we corrected
     
     for i in tqdm(range(n_bootstrap), desc="Bootstrap (PID-level)"):
         # Sample participants
@@ -279,8 +202,8 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
             continue
         
         try:
-            # Create background knowledge
-            bk = create_background_knowledge(feature_names, base_vars)
+            # Create background knowledge with temporal direction
+            bk = create_background_knowledge(feature_names, base_vars, dataset_type=dataset_type)
             
             # Run PC algorithm
             with open(os.devnull, 'w') as devnull:
@@ -305,42 +228,110 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
             adj_matrix = graph.graph
             edges_this_iteration = []
             
+            # Helper function to check if variable is wearable
+            def is_wearable(var):
+                return var not in base_vars
+            
             for i_node in range(n_nodes):
                 for j_node in range(i_node + 1, n_nodes):
-                    from_var = feature_names[i_node]
-                    to_var = feature_names[j_node]
+                    var_i = feature_names[i_node]
+                    var_j = feature_names[j_node]
                     
+                    # Check if there's any edge between these nodes
                     if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
-                        if adj_matrix[i_node, j_node] != 0 and adj_matrix[j_node, i_node] != 0:
-                            # Undirected
-                            edge_key = tuple(sorted([from_var, to_var]))
-                            edge_types[edge_key] = 'undirected'
-                        elif adj_matrix[i_node, j_node] != 0:
-                            # Directed i -> j
-                            edge_key = (from_var, to_var)
+                        # Determine edge type based on adjacency matrix values
+                        # In causal-learn PC algorithm:
+                        # -1 at position indicates tail (no arrowhead)
+                        # 1 at position indicates arrowhead
+                        # i -> j: graph[i][j] = -1 (tail at i), graph[j][i] = 1 (head at j)
+                        # i <- j: graph[i][j] = 1 (head at i), graph[j][i] = -1 (tail at j)
+                        # i -- j: graph[i][j] = -1 (tail at i), graph[j][i] = -1 (tail at j)
+                        # i <-> j: graph[i][j] = 1 (head at i), graph[j][i] = 1 (head at j)
+                        
+                        i_to_j = adj_matrix[i_node, j_node]
+                        j_to_i = adj_matrix[j_node, i_node]
+                        
+                        # Check if this is a survey-wearable edge
+                        is_survey_wearable_edge = (is_wearable(var_i) != is_wearable(var_j))
+                        
+                        # Determine edge structure from matrix values
+                        if i_to_j == -1 and j_to_i == 1:
+                            # Directed: i -> j
+                            edge_key = (var_i, var_j)
                             edge_types[edge_key] = 'directed'
-                        elif adj_matrix[j_node, i_node] != 0:
-                            # Directed j -> i
-                            edge_key = (to_var, from_var)
+                        elif i_to_j == 1 and j_to_i == -1:
+                            # Directed: j -> i
+                            edge_key = (var_j, var_i)
                             edge_types[edge_key] = 'directed'
+                        elif i_to_j == -1 and j_to_i == -1:
+                            # Undirected: i -- j
+                            if is_survey_wearable_edge and dataset_type:
+                                # For survey-wearable edges, force temporal direction
+                                survey_var = var_i if not is_wearable(var_i) else var_j
+                                wearable_var = var_j if is_wearable(var_j) else var_i
+                                
+                                if dataset_type == 'after':
+                                    edge_key = (survey_var, wearable_var)
+                                else:  # 'before'
+                                    edge_key = (wearable_var, survey_var)
+                                edge_types[edge_key] = 'directed'
+                                direction_corrections += 1
+                                if verbose:
+                                    print(f"  [Corrected] Forcing {edge_key[0]} -> {edge_key[1]} (was undirected)")
+                            else:
+                                # Keep as truly undirected
+                                edge_key = tuple(sorted([var_i, var_j]))
+                                edge_types[edge_key] = 'undirected'
+                        elif i_to_j == 1 and j_to_i == 1:
+                            # Bidirected: i <-> j
+                            if is_survey_wearable_edge and dataset_type:
+                                # For survey-wearable edges, force temporal direction
+                                survey_var = var_i if not is_wearable(var_i) else var_j
+                                wearable_var = var_j if is_wearable(var_j) else var_i
+                                
+                                if dataset_type == 'after':
+                                    edge_key = (survey_var, wearable_var)
+                                else:  # 'before'
+                                    edge_key = (wearable_var, survey_var)
+                                edge_types[edge_key] = 'directed'
+                                direction_corrections += 1
+                                if verbose:
+                                    print(f"  [Corrected] Forcing {edge_key[0]} -> {edge_key[1]} (was bidirected)")
+                            else:
+                                # Keep as bidirected
+                                edge_key = tuple(sorted([var_i, var_j]))
+                                edge_types[edge_key] = 'bidirected'
+                        else:
+                            # Shouldn't happen with standard PC algorithm, but handle gracefully
+                            continue
                         
                         edge_counts[edge_key] += 1
                         edges_this_iteration.append(edge_key)
             
-            # Count key edges
-            if ('rem_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['rem_std', 'promis_dep_sum'])) in edges_this_iteration:
-                rem_dep_count += 1
-            if ('deep_std', 'promis_dep_sum') in edges_this_iteration or \
-               tuple(sorted(['deep_std', 'promis_dep_sum'])) in edges_this_iteration:
-                deep_dep_count += 1
+            # Count key edges - FIXED: Direction based on dataset type
+            # Check for edges in the stored format (now enforced by temporal constraints)
+            if dataset_type == 'after':
+                # AFTER: survey -> wearable
+                if ('promis_dep_sum', 'rem_std') in edges_this_iteration:
+                    rem_dep_count += 1
+                if ('promis_dep_sum', 'deep_std') in edges_this_iteration:
+                    deep_dep_count += 1
+            else:
+                # BEFORE (or default): wearable -> survey
+                if ('rem_std', 'promis_dep_sum') in edges_this_iteration:
+                    rem_dep_count += 1
+                if ('deep_std', 'promis_dep_sum') in edges_this_iteration:
+                    deep_dep_count += 1
+            
+            # Anxiety-depression can be bidirectional or undirected
             if ('promis_anx_sum', 'promis_dep_sum') in edges_this_iteration or \
+               ('promis_dep_sum', 'promis_anx_sum') in edges_this_iteration or \
                tuple(sorted(['promis_anx_sum', 'promis_dep_sum'])) in edges_this_iteration:
                 anxiety_dep_count += 1
                 
             successful_iterations += 1
             
-        except:
+        except Exception as e:
             continue
     
     return {
@@ -349,12 +340,13 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
         'successful_iterations': successful_iterations,
         'rem_dep_count': rem_dep_count,
         'deep_dep_count': deep_dep_count,
-        'anxiety_dep_count': anxiety_dep_count
+        'anxiety_dep_count': anxiety_dep_count,
+        'dataset_type': dataset_type,
+        'direction_corrections': direction_corrections
     }
 
 
-
-def create_background_knowledge(feature_names, base_vars, dataset_type=None):
+def create_background_knowledge(feature_names, base_vars, dataset_type='before'):
     """
     Create background knowledge constraints for PC algorithm.
     
@@ -386,28 +378,26 @@ def create_background_knowledge(feature_names, base_vars, dataset_type=None):
     
     # Require temporal directions based on dataset type
     outcome_vars = [name for name in feature_names if name in base_vars]
-    
-    if dataset_type == 'before':
-        # BEFORE: wearable comes before survey, so wearable -> survey
-        for sensor_feature in sensor_features:
-            for outcome_var in outcome_vars:
-                bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
-    elif dataset_type == 'after':
-        # AFTER: survey comes before wearable, so survey -> wearable
+
+    if dataset_type == 'after':
+        # AFTER: survey comes before wearable, so survey -> wearable ONLY
         for sensor_feature in sensor_features:
             for outcome_var in outcome_vars:
                 bk.add_required_by_node(name_to_node[outcome_var], name_to_node[sensor_feature])
-    else:
-        # No temporal constraint specified - default to sensor -> outcome
+                bk.add_forbidden_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
+    elif dataset_type == 'before':
+        # BEFORE: wearable comes before survey, so wearable -> survey ONLY
         for sensor_feature in sensor_features:
             for outcome_var in outcome_vars:
                 bk.add_required_by_node(name_to_node[sensor_feature], name_to_node[outcome_var])
+                bk.add_forbidden_by_node(name_to_node[outcome_var], name_to_node[sensor_feature])
+    # else: No temporal constraint if dataset_type is None
     
     return bk
 
 
-def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=0.6, alpha=0.05, 
-                          use_pid_bootstrap=True, use_baseline=True):
+def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=0.5, alpha=0.05, 
+                          use_pid_bootstrap=True, use_first_survey=True):
     """
     Analyze a single dataset with PC algorithm.
     
@@ -417,8 +407,8 @@ def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=
         n_bootstrap: Number of bootstrap iterations
         sample_frac: Fraction of data/participants to sample
         alpha: Significance level
-        use_pid_bootstrap: If True, use pid-level bootstrapping; if False, use row-level
-        use_baseline: If True (and use_pid_bootstrap=True), use only baseline surveys
+        use_pid_bootstrap: If True, use pid-level bootstrapping
+        use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
         
     Returns:
         Dictionary with analysis results, or None if data loading fails
@@ -430,6 +420,9 @@ def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=
     
     base_vars = ["promis_dep_sum", "promis_anx_sum"]
     
+    # Infer dataset type from name or path
+    dataset_type = infer_dataset_type(dataset_name)
+    
     if use_pid_bootstrap:
         # Prepare feature names (excluding pid which we'll handle separately)
         metric_cols = [c for c in df.columns if c.endswith("_mean") or c.endswith("_std")]
@@ -438,13 +431,16 @@ def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=
         
         # Run PID-level bootstrap analysis
         results = bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, 
-                                              n_bootstrap, sample_frac, alpha, use_baseline)
+                                              n_bootstrap, sample_frac, alpha, 
+                                              use_first_survey, dataset_type)
     else:
         # Prepare variables (original method)
         feature_names, X = prepare_variables(df, keep_pid=False)
         
-        # Run row-level bootstrap analysis
+        # Note: Original row-level bootstrap doesn't use dataset_type
+        # Would need to be added if needed
         results = bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap, sample_frac, alpha)
+        results['dataset_type'] = dataset_type
     
     return results
 
@@ -463,19 +459,21 @@ def print_results(results, dataset_name, min_frequency=0.1):
         rem_dep = results['rem_dep_count']
         deep_dep = results['deep_dep_count']
         anx_dep = results['anxiety_dep_count']
+        dataset_type = results.get('dataset_type')
+        corrections = results.get('direction_corrections', 0)
         
+        # FIXED: Print correct direction based on dataset type
         print(f"\n{dataset_name}:")
-        print(f"  rem_std -> promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-        print(f"  deep_std -> promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
+        if dataset_type == 'after':
+            print(f"  promis_dep_sum -> rem_std: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
+            print(f"  promis_dep_sum -> deep_std: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
+        else:  # 'before' or default
+            print(f"  rem_std -> promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
+            print(f"  deep_std -> promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
         print(f"  promis_anx_sum <-> promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
         
-        # Determine dataset type for temporal filtering
-        dataset_type = None
-        name_lower = dataset_name.lower()
-        if 'before' in name_lower:
-            dataset_type = 'before'
-        elif 'after' in name_lower:
-            dataset_type = 'after'
+        if corrections > 0:
+            print(f"  [Note: {corrections} survey-wearable edges were corrected to enforce temporal direction]")
         
         # Print all significant edges with temporal filtering
         print_all_edges(results, min_frequency=min_frequency, dataset_type=dataset_type)
@@ -575,7 +573,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
                 # Directed edge
                 from_var, to_var = edge
                 edge_str = f"{from_var} -> {to_var}"
-                is_outcome = to_var in outcome_vars
+                is_outcome = to_var in outcome_vars or from_var in outcome_vars
         else:
             # Shouldn't happen, but handle gracefully
             edge_str = str(edge)
@@ -595,10 +593,10 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     elif dataset_type == 'after':
         direction_note = " [Showing: Survey -> Wearable edges only]"
     
-    # Print edges to outcome variables
+    # Print edges involving outcome variables
     if outcome_edges:
         print(f"\n  {'='*70}")
-        print(f"  EDGES TO DEPRESSION/ANXIETY (>={min_frequency*100:.0f}%){direction_note}")
+        print(f"  EDGES INVOLVING DEPRESSION/ANXIETY (>={min_frequency*100:.0f}%){direction_note}")
         print(f"  {'='*70}")
         for edge_str, count, freq, _ in outcome_edges:
             print(f"  * {edge_str}: {count}/{total} ({freq*100:.1f}%)")
@@ -617,7 +615,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     print(f"    Edges >={min_frequency*100:.0f}% frequency: {len(significant_edges)}")
     if dataset_type:
         print(f"    Edges displayed after temporal filtering: {len(sorted_edges)}")
-    print(f"    Edges to outcomes: {len(outcome_edges)}")
+    print(f"    Edges involving outcomes: {len(outcome_edges)}")
     print(f"    Other edges: {len(other_edges)}")
 
 
@@ -647,7 +645,7 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
         rem_stabilities = [v['rem_dep_count']/v['successful_iterations'] for v in valid_results.values()]
         rem_consistency = max(rem_stabilities) - min(rem_stabilities) < 0.2
         
-        print(f"  rem_std -> depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
+        print(f"  rem_std <-> depression: {'CONSISTENT' if rem_consistency else 'VARIABLE'} across time windows")
         
         for i, (name, stability) in enumerate(zip(valid_results.keys(), rem_stabilities)):
             assessment = "STRONG" if stability >= 0.7 else "MODERATE" if stability >= 0.5 else "WEAK"
@@ -655,7 +653,7 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
 
 
 def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, alpha=0.05,
-                            use_pid_bootstrap=True, use_baseline=True, min_frequency=0.1):
+                            use_pid_bootstrap=True, use_first_survey=True, min_frequency=0.1):
     """
     Run temporal causal discovery analysis using PC algorithm on multiple datasets.
     
@@ -665,7 +663,7 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
         sample_frac: Fraction of data/participants to sample in each iteration
         alpha: Significance level for independence tests
         use_pid_bootstrap: If True, use pid-level bootstrapping; if False, use row-level
-        use_baseline: If True (and use_pid_bootstrap=True), use only baseline surveys
+        use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
         min_frequency: Minimum frequency threshold to display edges (default 0.1 = 10%)
         
     Returns:
@@ -674,7 +672,7 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
     print("="*60)
     print("TEMPORAL CAUSAL DISCOVERY ANALYSIS (PC ALGORITHM)")
     if use_pid_bootstrap:
-        print(f"Bootstrapping: PID-level (baseline only: {use_baseline})")
+        print(f"Bootstrapping: PID-level (first survey only: {use_first_survey})")
     else:
         print("Bootstrapping: Row-level")
     print("="*60)
@@ -684,7 +682,7 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
     # Analyze each dataset
     for name, path in dataset_paths.items():
         results[name] = analyze_single_dataset(path, name, n_bootstrap, sample_frac, alpha,
-                                              use_pid_bootstrap, use_baseline)
+                                              use_pid_bootstrap, use_first_survey)
     
     # Compare results
     compare_temporal_results(results, min_frequency=min_frequency)
@@ -700,7 +698,7 @@ if __name__ == "__main__":
         "6w_to_2w_before": "data/preprocessed/full_run/6w_to_2w_before/survey_wearable_42d_before_to_14d_before_baseline_adj_full.csv"
     }
     
-    # Run analysis with PID-level bootstrapping on baseline surveys
+    # Run analysis with PID-level bootstrapping on first surveys
     # min_frequency=0.1 means only show edges that appear in >=10% of iterations
     results = run_temporal_pc_analysis(
         dataset_paths,
@@ -708,6 +706,6 @@ if __name__ == "__main__":
         sample_frac=0.5,
         alpha=0.05,
         use_pid_bootstrap=True,
-        use_baseline=True,
-        min_frequency=0.1  # Show edges appearing in >=10% of bootstrap samples
+        use_first_survey=True,
+        min_frequency=0.1
     )

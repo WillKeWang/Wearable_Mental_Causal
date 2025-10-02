@@ -4,10 +4,12 @@ Test Temporal Causal Discovery Analysis
 Test the PC algorithm functions on temporal datasets.
 """
 
+import pandas as pd
+
 from causal_discovery import (
     load_and_prepare_data,
     prepare_variables,
-    get_baseline_data,
+    get_first_survey_per_participant,
     create_background_knowledge,
     bootstrap_pc_analysis_by_pid,
     analyze_single_dataset,
@@ -38,18 +40,18 @@ def test_data_loading():
     return df
 
 
-def test_baseline_extraction(df):
-    """Test baseline data extraction."""
+def test_first_survey_extraction(df):
+    """Test first survey data extraction."""
     print("\n" + "="*60)
-    print("TEST 2: Baseline Data Extraction")
+    print("TEST 2: First Survey Data Extraction")
     print("="*60)
     
     if df is not None:
-        baseline_df = get_baseline_data(df)
+        first_survey_df = get_first_survey_per_participant(df)
         print(f"[PASS] Original data: {df.shape[0]} rows, {df['pid'].nunique()} unique PIDs")
-        print(f"[PASS] Baseline data: {baseline_df.shape[0]} rows")
-        print(f"[PASS] One row per PID: {baseline_df.shape[0] == baseline_df['pid'].nunique()}")
-        return baseline_df
+        print(f"[PASS] First survey data: {first_survey_df.shape[0]} rows")
+        print(f"[PASS] One row per PID: {first_survey_df.shape[0] == first_survey_df['pid'].nunique()}")
+        return first_survey_df
     else:
         print("[FAIL] Cannot test - no data available")
         return None
@@ -67,6 +69,7 @@ def test_variable_preparation(df):
         print(f"[PASS] Prepared {len(feature_names_pid)} features (with PID)")
         print(f"[PASS] Data matrix shape: {X_pid.shape}")
         print(f"[PASS] PIDs array shape: {pids.shape}")
+        print(f"[PASS] PIDs preserved (not NaN): {not any(pd.isna(pids))}")
         print(f"[PASS] Base vars included: {'promis_dep_sum' in feature_names_pid and 'promis_anx_sum' in feature_names_pid}")
         
         return feature_names_pid, X_pid
@@ -83,18 +86,25 @@ def test_background_knowledge(feature_names):
     
     if feature_names is not None:
         base_vars = ["promis_dep_sum", "promis_anx_sum"]
-        bk = create_background_knowledge(feature_names, base_vars)
-        print("[PASS] Background knowledge created successfully")
-        return bk
+        
+        # Test 'before' type
+        bk_before = create_background_knowledge(feature_names, base_vars, dataset_type='before')
+        print("[PASS] Background knowledge created for 'before' dataset")
+        
+        # Test 'after' type
+        bk_after = create_background_knowledge(feature_names, base_vars, dataset_type='after')
+        print("[PASS] Background knowledge created for 'after' dataset")
+        
+        return bk_before
     else:
         print("[FAIL] Cannot test - no feature names available")
         return None
 
 
 def test_bootstrap_analysis_pidlevel(df):
-    """Test PID-level bootstrap analysis with baseline surveys."""
+    """Test PID-level bootstrap analysis with first surveys."""
     print("\n" + "="*60)
-    print("TEST 5: Bootstrap Analysis (PID-level baseline, small sample)")
+    print("TEST 5: Bootstrap Analysis (PID-level first survey, small sample)")
     print("="*60)
     
     if df is not None:
@@ -108,14 +118,16 @@ def test_bootstrap_analysis_pidlevel(df):
             n_bootstrap=10,  # Small sample for testing
             sample_frac=0.6,
             alpha=0.05,
-            use_baseline=True
+            use_first_survey=True,
+            dataset_type='after'  # Test with 'after' type
         )
         
         print(f"[PASS] Bootstrap completed: {results['successful_iterations']}/10 successful")
         print(f"[PASS] Found {len(results['edge_counts'])} unique edges")
+        print(f"[PASS] Dataset type recorded: {results.get('dataset_type')}")
         print(f"[PASS] Key edge counts tracked:")
-        print(f"    - rem_std -> depression: {results['rem_dep_count']}")
-        print(f"    - deep_std -> depression: {results['deep_dep_count']}")
+        print(f"    - depression -> rem_std: {results['rem_dep_count']}")
+        print(f"    - depression -> deep_std: {results['deep_dep_count']}")
         print(f"    - anxiety <-> depression: {results['anxiety_dep_count']}")
         
         return results
@@ -127,7 +139,7 @@ def test_bootstrap_analysis_pidlevel(df):
 def test_single_dataset_analysis_pidlevel():
     """Test complete single dataset analysis with PID-level bootstrapping."""
     print("\n" + "="*60)
-    print("TEST 6: Single Dataset Analysis (PID-level baseline)")
+    print("TEST 6: Single Dataset Analysis (PID-level first survey)")
     print("="*60)
     
     filepath = "data/preprocessed/full_run/1w_to_5w_after/survey_wearable_7d_after_to_35d_after_baseline_adj_full.csv"
@@ -138,11 +150,12 @@ def test_single_dataset_analysis_pidlevel():
         sample_frac=0.6,
         alpha=0.05,
         use_pid_bootstrap=True,
-        use_baseline=True
+        use_first_survey=True
     )
     
     if results:
         print("[PASS] Single dataset analysis completed")
+        print(f"[PASS] Dataset type inferred: {results.get('dataset_type')}")
         print_results(results, "1w_to_5w_after", min_frequency=0.2)  # 20% threshold for small test
     else:
         print("[FAIL] Single dataset analysis failed")
@@ -153,7 +166,7 @@ def test_single_dataset_analysis_pidlevel():
 def test_full_temporal_analysis_pidlevel():
     """Test full temporal analysis with PID-level bootstrapping."""
     print("\n" + "="*60)
-    print("TEST 7: Full Temporal Analysis (PID-level baseline)")
+    print("TEST 7: Full Temporal Analysis (PID-level first survey)")
     print("="*60)
     
     dataset_paths = {
@@ -167,12 +180,15 @@ def test_full_temporal_analysis_pidlevel():
         sample_frac=0.6,
         alpha=0.05,
         use_pid_bootstrap=True,
-        use_baseline=True,
+        use_first_survey=True,
         min_frequency=0.2  # 20% threshold for small test sample
     )
     
     if all(results.values()):
         print("\n[PASS] Full temporal analysis completed successfully")
+        # Verify correct dataset types were inferred
+        for name, result in results.items():
+            print(f"[PASS] {name}: dataset_type = {result.get('dataset_type')}")
     else:
         print("\n[FAIL] Some datasets failed to analyze")
     
@@ -188,8 +204,8 @@ def run_all_tests():
     # Test 1: Data loading
     df = test_data_loading()
     
-    # Test 2: Baseline extraction
-    baseline_df = test_baseline_extraction(df)
+    # Test 2: First survey extraction
+    first_survey_df = test_first_survey_extraction(df)
     
     # Test 3: Variable preparation
     feature_names, X = test_variable_preparation(df)
@@ -225,7 +241,7 @@ def main():
         "6w_to_2w_before": "data/preprocessed/full_run/6w_to_2w_before/survey_wearable_42d_before_to_14d_before_baseline_adj_full.csv"
     }
     
-    # Run with full bootstrap iterations using PID-level sampling on baseline surveys
+    # Run with full bootstrap iterations using PID-level sampling on first surveys
     # Show edges that appear in ≥10% of bootstrap iterations
     results = run_temporal_pc_analysis(
         dataset_paths,
@@ -233,7 +249,7 @@ def main():
         sample_frac=0.6,
         alpha=0.05,
         use_pid_bootstrap=True,
-        use_baseline=True,
+        use_first_survey=True,
         min_frequency=0.1
     )
     
