@@ -343,5 +343,5 @@ fig.legend(handles=legend_elements, loc='lower center',
           ncol=5, fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.01))
 
 plt.tight_layout()
-plt.savefig('temporal_causal_networks_hierarchical.png', dpi=300, bbox_inches='tight')
+plt.savefig('test_causal_graph_1.png', dpi=300, bbox_inches='tight')
 plt.show()

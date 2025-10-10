@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import Ellipse, Circle, FancyArrowPatch
+from matplotlib.patches import Ellipse, FancyArrowPatch
 import numpy as np
 
 # All edges ≥50% for BEFORE period (wearable → survey)
-before_edges = {
+before_edges_full = {
     ('rem_std', 'promis_dep_sum'): 93,
     ('awake_std', 'promis_dep_sum'): 83,
     ('promis_dep_sum', 'promis_anx_sum'): 67,
@@ -70,7 +70,7 @@ before_edges = {
 }
 
 # All edges ≥50% for AFTER period (survey → wearable)
-after_edges = {
+after_edges_full = {
     ('promis_anx_sum', 'promis_dep_sum'): 100,
     ('promis_dep_sum', 'deep_std'): 96,
     ('promis_dep_sum', 'rem_std'): 87,
@@ -145,6 +145,56 @@ after_edges = {
     ('light_std', 'temperature_max_std'): 50,
 }
 
+def find_ancestors(target_nodes, edges):
+    """Find all ancestors (nodes with paths to target) in directed graph."""
+    ancestors = set(target_nodes)
+    changed = True
+    
+    while changed:
+        changed = False
+        for (source, target) in edges.keys():
+            if target in ancestors and source not in ancestors:
+                ancestors.add(source)
+                changed = True
+    
+    return ancestors
+
+def find_descendants(source_nodes, edges):
+    """Find all descendants (nodes reachable from source) in directed graph."""
+    descendants = set(source_nodes)
+    changed = True
+    
+    while changed:
+        changed = False
+        for (source, target) in edges.keys():
+            if source in descendants and target not in descendants:
+                descendants.add(target)
+                changed = True
+    
+    return descendants
+
+def filter_edges_by_relevance(edges, target_vars, direction='before'):
+    """Filter edges to include only those relevant to target variables."""
+    if direction == 'before':
+        # Find all ancestors of target variables
+        relevant_nodes = find_ancestors(target_vars, edges)
+    else:  # 'after'
+        # Find all descendants of target variables
+        relevant_nodes = find_descendants(target_vars, edges)
+    
+    # Filter edges to only include those between relevant nodes
+    filtered_edges = {
+        (source, target): pct 
+        for (source, target), pct in edges.items()
+        if source in relevant_nodes and target in relevant_nodes
+    }
+    
+    return filtered_edges
+
+def filter_edges_by_threshold(edges, threshold):
+    """Filter edges by percentage threshold."""
+    return {k: v for k, v in edges.items() if v >= threshold}
+
 def format_label(var):
     """Format variable label, breaking long names into two lines."""
     if var == 'promis_dep_sum':
@@ -152,10 +202,8 @@ def format_label(var):
     elif var == 'promis_anx_sum':
         return 'Anxiety'
     
-    # Replace underscores with spaces
     label = var.replace('_', ' ')
     
-    # Break long labels into two lines
     if len(label) > 20:
         words = label.split()
         mid = len(words) // 2
@@ -169,7 +217,6 @@ def get_ellipse_size(var):
     """Get ellipse size based on variable name length."""
     label = format_label(var)
     
-    # Check if label has line break
     if '\n' in label:
         max_line_len = max(len(line) for line in label.split('\n'))
         width = max(2.8, max_line_len * 0.15 + 1.0)
@@ -184,13 +231,11 @@ def create_hierarchical_layout(edges):
     """Create a hierarchical layout with survey at top, grouped wearables below."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
-    # Collect all nodes
     all_nodes = set()
     for (source, target) in edges.keys():
         all_nodes.add(source)
         all_nodes.add(target)
     
-    # Separate survey and wearable variables
     wearable_vars = all_nodes - survey_vars
     
     # Group wearables by category
@@ -202,12 +247,11 @@ def create_hierarchical_layout(edges):
     positions = {}
     
     # Position survey variables at top center
-    if 'promis_dep_sum' in survey_vars:
+    if 'promis_dep_sum' in all_nodes:
         positions['promis_dep_sum'] = (10, 18)
-    if 'promis_anx_sum' in survey_vars:
+    if 'promis_anx_sum' in all_nodes:
         positions['promis_anx_sum'] = (10, 16)
     
-    # Position wearable groups in layers with larger spacing
     y_base = 12
     x_positions = {
         'sleep': (2, y_base),
@@ -216,25 +260,21 @@ def create_hierarchical_layout(edges):
         'temp': (25, y_base)
     }
     
-    # Layout sleep variables with larger spacing
     for i, var in enumerate(sorted(sleep_vars)):
         x_offset = (i % 3) * 4.5
         y_offset = (i // 3) * -2.5
         positions[var] = (x_positions['sleep'][0] + x_offset, x_positions['sleep'][1] + y_offset)
     
-    # Layout HR variables with larger spacing
     for i, var in enumerate(sorted(hr_vars)):
         x_offset = (i % 2) * 4.5
         y_offset = (i // 2) * -2.5
         positions[var] = (x_positions['hr'][0] + x_offset, x_positions['hr'][1] + y_offset)
     
-    # Layout breath variables with larger spacing
     for i, var in enumerate(sorted(breath_vars)):
         x_offset = (i % 2) * 4.5
         y_offset = (i // 2) * -2.5
         positions[var] = (x_positions['breath'][0] + x_offset, x_positions['breath'][1] + y_offset)
     
-    # Layout temp variables with larger spacing
     for i, var in enumerate(sorted(temp_vars)):
         x_offset = (i % 2) * 4.5
         y_offset = (i // 2) * -2.5
@@ -246,10 +286,9 @@ def create_clean_hierarchical_plot(edges, title, ax):
     """Create hierarchical network visualization."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
-    # Get positions
     pos = create_hierarchical_layout(edges)
     
-    # Draw edges with thin lines and thick arrowheads
+    # Draw edges
     for (source, target), percentage in edges.items():
         if source not in pos or target not in pos:
             continue
@@ -257,19 +296,17 @@ def create_clean_hierarchical_plot(edges, title, ax):
         start_pos = pos[source]
         end_pos = pos[target]
         
-        # Calculate opacity: map 50%-100% to 10%-100%
-        alpha = 0.1 + ((percentage - 50) / 50) * 0.9
+        # Map 50%-100% to 0.2-1.0 opacity
+        alpha = 0.2 + ((percentage - 50) / 50) * 0.8
         
-        # Use FancyArrowPatch with thin line but thick arrowhead
-        # The mutation_scale parameter controls arrow size independently
         arrow = FancyArrowPatch(
             start_pos, end_pos,
-            arrowstyle='-|>',  # Simple arrow style
+            arrowstyle='-|>',
             color='black',
-            linewidth=0.5,  # Very thin line
+            linewidth=0.8,
             alpha=alpha,
             connectionstyle="arc3,rad=0.0",
-            mutation_scale=25,  # Controls arrow head size
+            mutation_scale=20,
             zorder=1,
             shrinkA=10,
             shrinkB=10
@@ -283,17 +320,15 @@ def create_clean_hierarchical_plot(edges, title, ax):
         label = format_label(node)
         
         if is_survey:
-            # Elliptical nodes for survey variables
             ellipse = Ellipse(node_pos, width, height,
                             facecolor='white',
                             edgecolor='black',
-                            linewidth=2.5,  # Bold border
+                            linewidth=2.5,
                             zorder=3)
             ax.add_patch(ellipse)
             fontsize = 9
             fontweight = 'bold'
         else:
-            # Elliptical nodes for wearables
             ellipse = Ellipse(node_pos, width, height,
                             facecolor='white',
                             edgecolor='#2C3E50',
@@ -314,20 +349,28 @@ def create_clean_hierarchical_plot(edges, title, ax):
     ax.axis('off')
     ax.set_title(title, fontsize=13, fontweight='bold', pad=20)
 
-# Create figure
-fig, axes = plt.subplots(1, 2, figsize=(26, 14))
-fig.suptitle('Temporal Causal Discovery: Full Network (Edges ≥50%)',
+# Target variables
+target_vars = {'promis_dep_sum', 'promis_anx_sum'}
+
+# Filter edges for relevance and threshold
+before_edges_50 = filter_edges_by_relevance(before_edges_full, target_vars, 'before')
+after_edges_50 = filter_edges_by_relevance(after_edges_full, target_vars, 'after')
+
+before_edges_80 = filter_edges_by_threshold(before_edges_50, 80)
+after_edges_80 = filter_edges_by_threshold(after_edges_50, 80)
+
+# Create figures
+fig1, axes1 = plt.subplots(1, 2, figsize=(26, 14))
+fig1.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥50%)',
              fontsize=15, fontweight='bold', y=0.97)
 
-# Create plots
-create_clean_hierarchical_plot(before_edges,
+create_clean_hierarchical_plot(before_edges_50,
                                'BEFORE (6-2 weeks before)\nWearable → Survey',
-                               axes[0])
-create_clean_hierarchical_plot(after_edges,
+                               axes1[0])
+create_clean_hierarchical_plot(after_edges_50,
                                'AFTER (1-5 weeks after)\nSurvey → Wearable',
-                               axes[1])
+                               axes1[1])
 
-# Add legend
 legend_elements = [
     mpatches.FancyBboxPatch((0, 0), 1, 0.4, boxstyle="round,pad=0.1", 
                             facecolor='white', edgecolor='black', linewidth=2.5, 
@@ -339,9 +382,50 @@ legend_elements = [
     mpatches.Patch(facecolor='black', alpha=0.65, label='70-90% frequency'),
     mpatches.Patch(facecolor='black', alpha=0.35, label='50-70% frequency')
 ]
-fig.legend(handles=legend_elements, loc='lower center',
-          ncol=5, fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.15))
+fig1.legend(handles=legend_elements, loc='lower center',
+          ncol=5, fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.02))
 
 plt.tight_layout()
-plt.savefig('temporal_causal_networks_hierarchical.png', dpi=300, bbox_inches='tight')
+plt.savefig('causal_graph_50pct.png', dpi=300, bbox_inches='tight')
+
+# Create 80% threshold figure
+fig2, axes2 = plt.subplots(1, 2, figsize=(26, 14))
+fig2.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥80%)',
+             fontsize=15, fontweight='bold', y=0.97)
+
+create_clean_hierarchical_plot(before_edges_80,
+                               'BEFORE (6-2 weeks before)\nWearable → Survey',
+                               axes2[0])
+create_clean_hierarchical_plot(after_edges_80,
+                               'AFTER (1-5 weeks after)\nSurvey → Wearable',
+                               axes2[1])
+
+legend_elements_80 = [
+    mpatches.FancyBboxPatch((0, 0), 1, 0.4, boxstyle="round,pad=0.1", 
+                            facecolor='white', edgecolor='black', linewidth=2.5, 
+                            label='Survey Variables (bold border)'),
+    mpatches.FancyBboxPatch((0, 0), 1, 0.4, boxstyle="round,pad=0.1",
+                            facecolor='white', edgecolor='#2C3E50', linewidth=1, 
+                            label='Wearable Variables'),
+    mpatches.Patch(facecolor='black', alpha=0.95, label='90-100% frequency'),
+    mpatches.Patch(facecolor='black', alpha=0.75, label='80-90% frequency')
+]
+fig2.legend(handles=legend_elements_80, loc='lower center',
+          ncol=4, fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.02))
+
+plt.tight_layout()
+plt.savefig('causal_graph_80pct.png', dpi=300, bbox_inches='tight')
+
 plt.show()
+
+# Print statistics
+print(f"\n50% threshold:")
+print(f"  BEFORE: {len(before_edges_50)} edges")
+print(f"  AFTER: {len(after_edges_50)} edges")
+print(f"\n80% threshold:")
+print(f"  BEFORE: {len(before_edges_80)} edges")
+print(f"  AFTER: {len(after_edges_80)} edges")
+
+
+
+claude_comment = "I think this is better now. But do the following: remove the legends, and stack the subplots vertically instead of horizontally. Need your help with this though, because for the 80pct version, some arrows were covered and difficult to see. And more importantly, some variables are included that I don't know how they are causing depression. Like deep_std, it seems to be causing depression only when the threshold is 50%, but its parents are still showing up in the whole graph. You may need to filter for the threshold early and then do the ancester tracing. Also, add another threshold for 60%."
