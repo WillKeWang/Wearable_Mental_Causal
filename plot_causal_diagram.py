@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import Ellipse, Circle, FancyArrowPatch
+from matplotlib.patches import Ellipse, FancyArrowPatch
 import numpy as np
 
 # All edges ≥50% for BEFORE period (wearable → survey)
-before_edges = {
+before_edges_full = {
     ('rem_std', 'promis_dep_sum'): 93,
     ('awake_std', 'promis_dep_sum'): 83,
     ('promis_dep_sum', 'promis_anx_sum'): 67,
@@ -70,7 +70,7 @@ before_edges = {
 }
 
 # All edges ≥50% for AFTER period (survey → wearable)
-after_edges = {
+after_edges_full = {
     ('promis_anx_sum', 'promis_dep_sum'): 100,
     ('promis_dep_sum', 'deep_std'): 96,
     ('promis_dep_sum', 'rem_std'): 87,
@@ -145,6 +145,53 @@ after_edges = {
     ('light_std', 'temperature_max_std'): 50,
 }
 
+def find_ancestors(target_nodes, edges):
+    """Find all ancestors (nodes with paths to target) in directed graph."""
+    ancestors = set(target_nodes)
+    changed = True
+    
+    while changed:
+        changed = False
+        for (source, target) in edges.keys():
+            if target in ancestors and source not in ancestors:
+                ancestors.add(source)
+                changed = True
+    
+    return ancestors
+
+def find_descendants(source_nodes, edges):
+    """Find all descendants (nodes reachable from source) in directed graph."""
+    descendants = set(source_nodes)
+    changed = True
+    
+    while changed:
+        changed = False
+        for (source, target) in edges.keys():
+            if source in descendants and target not in descendants:
+                descendants.add(target)
+                changed = True
+    
+    return descendants
+
+def filter_edges_by_threshold_then_relevance(edges, target_vars, threshold, direction='before'):
+    """
+    CORRECT ORDER: First filter by threshold, THEN trace ancestors/descendants.
+    """
+    filtered_edges = {k: v for k, v in edges.items() if v >= threshold}
+    
+    if direction == 'before':
+        relevant_nodes = find_ancestors(target_vars, filtered_edges)
+    else:
+        relevant_nodes = find_descendants(target_vars, filtered_edges)
+    
+    final_edges = {
+        (source, target): pct 
+        for (source, target), pct in filtered_edges.items()
+        if source in relevant_nodes and target in relevant_nodes
+    }
+    
+    return final_edges
+
 def format_label(var):
     """Format variable label, breaking long names into two lines."""
     if var == 'promis_dep_sum':
@@ -152,10 +199,8 @@ def format_label(var):
     elif var == 'promis_anx_sum':
         return 'Anxiety'
     
-    # Replace underscores with spaces
     label = var.replace('_', ' ')
     
-    # Break long labels into two lines
     if len(label) > 20:
         words = label.split()
         mid = len(words) // 2
@@ -169,136 +214,133 @@ def get_ellipse_size(var):
     """Get ellipse size based on variable name length."""
     label = format_label(var)
     
-    # Check if label has line break
     if '\n' in label:
         max_line_len = max(len(line) for line in label.split('\n'))
-        width = max(2.8, max_line_len * 0.15 + 1.0)
-        height = 0.9
+        width = max(3.2, max_line_len * 0.18 + 1.2)
+        height = 1.0
     else:
-        width = max(2.8, len(label) * 0.12 + 0.5)
-        height = 0.6
+        width = max(3.2, len(label) * 0.14 + 0.7)
+        height = 0.7
     
     return width, height
 
+def get_ellipse_intersection(center, width, height, target_point):
+    """
+    Calculate the point where a line from center to target intersects the ellipse boundary.
+    """
+    cx, cy = center
+    tx, ty = target_point
+    
+    # Direction vector
+    dx = tx - cx
+    dy = ty - cy
+    
+    # Angle to target
+    angle = np.arctan2(dy, dx)
+    
+    # Semi-axes
+    a = width / 2
+    b = height / 2
+    
+    # Point on ellipse at this angle
+    x = cx + a * np.cos(angle)
+    y = cy + b * np.sin(angle)
+    
+    return (x, y)
+
 def create_hierarchical_layout(edges):
-    """Create a hierarchical layout with survey at top, grouped wearables below."""
+    """Create a hierarchical layout with STAGGERED positions."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
-    # Collect all nodes
     all_nodes = set()
     for (source, target) in edges.keys():
         all_nodes.add(source)
         all_nodes.add(target)
     
-    # Separate survey and wearable variables
     wearable_vars = all_nodes - survey_vars
     
     # Group wearables by category
-    sleep_vars = [v for v in wearable_vars if any(x in v for x in ['deep', 'rem', 'light', 'awake', 'efficiency', 'onset'])]
-    hr_vars = [v for v in wearable_vars if 'hr' in v or 'rmssd' in v]
-    breath_vars = [v for v in wearable_vars if 'breath' in v]
-    temp_vars = [v for v in wearable_vars if 'temperature' in v or 'temp' in v]
+    sleep_vars = sorted([v for v in wearable_vars if any(x in v for x in ['deep', 'rem', 'light', 'awake', 'efficiency', 'onset'])])
+    hr_vars = sorted([v for v in wearable_vars if 'hr' in v or 'rmssd' in v])
+    breath_vars = sorted([v for v in wearable_vars if 'breath' in v])
+    temp_vars = sorted([v for v in wearable_vars if 'temperature' in v or 'temp' in v])
     
     positions = {}
     
     # Position survey variables at top center
-    if 'promis_dep_sum' in survey_vars:
+    if 'promis_dep_sum' in all_nodes:
         positions['promis_dep_sum'] = (10, 18)
-    if 'promis_anx_sum' in survey_vars:
+    if 'promis_anx_sum' in all_nodes:
         positions['promis_anx_sum'] = (10, 16)
     
-    # Position wearable groups in layers
     y_base = 12
     x_positions = {
         'sleep': (2, y_base),
-        'hr': (7, y_base - 3),
-        'breath': (13, y_base - 3),
-        'temp': (18, y_base)
+        'hr': (8, y_base - 4),
+        'breath': (14, y_base - 4),
+        'temp': (20, y_base)
     }
     
-    # Layout sleep variables
-    for i, var in enumerate(sorted(sleep_vars)):
+    # STAGGERED positioning with alternating y-offsets
+    for i, var in enumerate(sleep_vars):
         x_offset = (i % 3) * 3.5
-        y_offset = (i // 3) * -2
-        positions[var] = (x_positions['sleep'][0] + x_offset, x_positions['sleep'][1] + y_offset)
+        y_offset = (i // 3) * -2.8
+        # Add stagger: alternate between +0.3 and -0.3
+        stagger = 0.4 * (1 if i % 2 == 0 else -1)
+        positions[var] = (x_positions['sleep'][0] + x_offset, x_positions['sleep'][1] + y_offset + stagger)
     
-    # Layout HR variables
-    for i, var in enumerate(sorted(hr_vars)):
-        x_offset = (i % 2) * 3
-        y_offset = (i // 2) * -2
-        positions[var] = (x_positions['hr'][0] + x_offset, x_positions['hr'][1] + y_offset)
-    
-    # Layout breath variables
-    for i, var in enumerate(sorted(breath_vars)):
-        x_offset = (i % 2) * 3
-        y_offset = (i // 2) * -2
-        positions[var] = (x_positions['breath'][0] + x_offset, x_positions['breath'][1] + y_offset)
-    
-    # Layout temp variables
-    for i, var in enumerate(sorted(temp_vars)):
+    for i, var in enumerate(hr_vars):
         x_offset = (i % 2) * 3.5
-        y_offset = (i // 2) * -2
-        positions[var] = (x_positions['temp'][0] + x_offset, x_positions['temp'][1] + y_offset)
+        y_offset = (i // 2) * -2.8
+        stagger = 0.4 * (1 if i % 2 == 0 else -1)
+        positions[var] = (x_positions['hr'][0] + x_offset, x_positions['hr'][1] + y_offset + stagger)
+    
+    for i, var in enumerate(breath_vars):
+        x_offset = (i % 2) * 3.5
+        y_offset = (i // 2) * -2.8
+        stagger = 0.4 * (1 if i % 2 == 0 else -1)
+        positions[var] = (x_positions['breath'][0] + x_offset, x_positions['breath'][1] + y_offset + stagger)
+    
+    for i, var in enumerate(temp_vars):
+        x_offset = (i % 2) * 3.5
+        y_offset = (i // 2) * -2.8
+        stagger = 0.4 * (1 if i % 2 == 0 else -1)
+        positions[var] = (x_positions['temp'][0] + x_offset, x_positions['temp'][1] + y_offset + stagger)
     
     return positions
 
 def create_clean_hierarchical_plot(edges, title, ax):
-    """Create hierarchical network visualization."""
+    """Create hierarchical network visualization with arrows to circumference."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
-    # Get positions
     pos = create_hierarchical_layout(edges)
     
-    # Draw edges with thin lines and thick arrowheads
-    for (source, target), percentage in edges.items():
-        if source not in pos or target not in pos:
-            continue
-        
-        start_pos = pos[source]
-        end_pos = pos[target]
-        
-        # Calculate opacity: map 50%-100% to 10%-100%
-        alpha = 0.1 + ((percentage - 50) / 50) * 0.9
-        
-        # Use FancyArrowPatch with thin line but thick arrowhead
-        # The mutation_scale parameter controls arrow size independently
-        arrow = FancyArrowPatch(
-            start_pos, end_pos,
-            arrowstyle='-|>',  # Simple arrow style
-            color='black',
-            linewidth=0.5,  # Very thin line
-            alpha=alpha,
-            connectionstyle="arc3,rad=0.0",
-            mutation_scale=25,  # Controls arrow head size
-            zorder=1,
-            shrinkA=10,
-            shrinkB=10
-        )
-        ax.add_patch(arrow)
+    # Store ellipse sizes for intersection calculation
+    ellipse_sizes = {}
+    for node in pos.keys():
+        ellipse_sizes[node] = get_ellipse_size(node)
     
-    # Draw nodes
+    # Draw nodes FIRST (behind arrows)
     for node, node_pos in pos.items():
         is_survey = node in survey_vars
         width, height = get_ellipse_size(node)
         label = format_label(node)
         
         if is_survey:
-            # Elliptical nodes for survey variables
             ellipse = Ellipse(node_pos, width, height,
                             facecolor='white',
                             edgecolor='black',
-                            linewidth=2.5,  # Bold border
-                            zorder=3)
+                            linewidth=2.5,
+                            zorder=2)
             ax.add_patch(ellipse)
             fontsize = 9
             fontweight = 'bold'
         else:
-            # Elliptical nodes for wearables
             ellipse = Ellipse(node_pos, width, height,
                             facecolor='white',
                             edgecolor='#2C3E50',
                             linewidth=1,
-                            zorder=3)
+                            zorder=2)
             ax.add_patch(ellipse)
             fontsize = 6.5
             fontweight = 'normal'
@@ -308,40 +350,115 @@ def create_clean_hierarchical_plot(edges, title, ax):
                fontsize=fontsize, fontweight=fontweight,
                zorder=4)
     
-    ax.set_xlim(-2, 24)
+    # Draw edges with circumference connections
+    for (source, target), percentage in edges.items():
+        if source not in pos or target not in pos:
+            continue
+        
+        source_center = pos[source]
+        target_center = pos[target]
+        source_width, source_height = ellipse_sizes[source]
+        target_width, target_height = ellipse_sizes[target]
+        
+        # Calculate intersection points on circumferences
+        start_pos = get_ellipse_intersection(source_center, source_width, source_height, target_center)
+        end_pos = get_ellipse_intersection(target_center, target_width, target_height, source_center)
+        
+        # Map to opacity
+        if percentage >= 80:
+            alpha = 0.3 + ((percentage - 80) / 20) * 0.7
+        elif percentage >= 60:
+            alpha = 0.25 + ((percentage - 60) / 20) * 0.5
+        else:
+            alpha = 0.2 + ((percentage - 50) / 10) * 0.3
+        
+        arrow = FancyArrowPatch(
+            start_pos, end_pos,
+            arrowstyle='-|>',
+            color='black',
+            linewidth=0.9,
+            alpha=alpha,
+            connectionstyle="arc3,rad=0.0",
+            mutation_scale=20,
+            zorder=3,
+            shrinkA=0,  # No shrink needed - already at circumference
+            shrinkB=0
+        )
+        ax.add_patch(arrow)
+    
+    ax.set_xlim(-2, 26)
     ax.set_ylim(-2, 20)
     ax.set_aspect('equal')
     ax.axis('off')
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=20)
+    ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
 
-# Create figure
-fig, axes = plt.subplots(1, 2, figsize=(26, 14))
-fig.suptitle('Temporal Causal Discovery: Full Network (Edges ≥50%)',
-             fontsize=15, fontweight='bold', y=0.97)
+# Target variables
+target_vars = {'promis_dep_sum', 'promis_anx_sum'}
 
-# Create plots
-create_clean_hierarchical_plot(before_edges,
-                               'BEFORE (6-2 weeks before)\nWearable → Survey',
-                               axes[0])
-create_clean_hierarchical_plot(after_edges,
-                               'AFTER (1-5 weeks after)\nSurvey → Wearable',
-                               axes[1])
+# Create filtered edge sets
+before_edges_50 = filter_edges_by_threshold_then_relevance(before_edges_full, target_vars, 50, 'before')
+after_edges_50 = filter_edges_by_threshold_then_relevance(after_edges_full, target_vars, 50, 'after')
 
-# Add legend
-legend_elements = [
-    mpatches.FancyBboxPatch((0, 0), 1, 0.4, boxstyle="round,pad=0.1", 
-                            facecolor='white', edgecolor='black', linewidth=2.5, 
-                            label='Survey Variables (bold border)'),
-    mpatches.FancyBboxPatch((0, 0), 1, 0.4, boxstyle="round,pad=0.1",
-                            facecolor='white', edgecolor='#2C3E50', linewidth=1, 
-                            label='Wearable Variables'),
-    mpatches.Patch(facecolor='black', alpha=0.95, label='90-100% frequency'),
-    mpatches.Patch(facecolor='black', alpha=0.65, label='70-90% frequency'),
-    mpatches.Patch(facecolor='black', alpha=0.35, label='50-70% frequency')
-]
-fig.legend(handles=legend_elements, loc='lower center',
-          ncol=5, fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.01))
+before_edges_60 = filter_edges_by_threshold_then_relevance(before_edges_full, target_vars, 60, 'before')
+after_edges_60 = filter_edges_by_threshold_then_relevance(after_edges_full, target_vars, 60, 'after')
 
-plt.tight_layout()
-plt.savefig('test_causal_graph_1.png', dpi=300, bbox_inches='tight')
+before_edges_80 = filter_edges_by_threshold_then_relevance(before_edges_full, target_vars, 80, 'before')
+after_edges_80 = filter_edges_by_threshold_then_relevance(after_edges_full, target_vars, 80, 'after')
+
+# Create figures with FIXED TITLE SPACING
+fig1, axes1 = plt.subplots(2, 1, figsize=(20, 22))
+fig1.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥50%)',
+             fontsize=16, fontweight='bold', y=0.985)
+
+create_clean_hierarchical_plot(before_edges_50,
+                               'BEFORE (6-2 weeks before) | Wearable → Survey',
+                               axes1[0])
+create_clean_hierarchical_plot(after_edges_50,
+                               'AFTER (1-5 weeks after) | Survey → Wearable',
+                               axes1[1])
+
+plt.tight_layout(rect=[0, 0, 1, 0.98])
+plt.savefig('causal_graph_50pct.png', dpi=300, bbox_inches='tight')
+
+# Create 60% threshold figure
+fig2, axes2 = plt.subplots(2, 1, figsize=(20, 22))
+fig2.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥60%)',
+             fontsize=16, fontweight='bold', y=0.985)
+
+create_clean_hierarchical_plot(before_edges_60,
+                               'BEFORE (6-2 weeks before) | Wearable → Survey',
+                               axes2[0])
+create_clean_hierarchical_plot(after_edges_60,
+                               'AFTER (1-5 weeks after) | Survey → Wearable',
+                               axes2[1])
+
+plt.tight_layout(rect=[0, 0, 1, 0.98])
+plt.savefig('causal_graph_60pct.png', dpi=300, bbox_inches='tight')
+
+# Create 80% threshold figure
+fig3, axes3 = plt.subplots(2, 1, figsize=(20, 22))
+fig3.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥80%)',
+             fontsize=16, fontweight='bold', y=0.985)
+
+create_clean_hierarchical_plot(before_edges_80,
+                               'BEFORE (6-2 weeks before) | Wearable → Survey',
+                               axes3[0])
+create_clean_hierarchical_plot(after_edges_80,
+                               'AFTER (1-5 weeks after) | Survey → Wearable',
+                               axes3[1])
+
+plt.tight_layout(rect=[0, 0, 1, 0.98])
+plt.savefig('causal_graph_80pct.png', dpi=300, bbox_inches='tight')
+
 plt.show()
+
+# Print statistics
+print(f"\n50% threshold:")
+print(f"  BEFORE: {len(before_edges_50)} edges")
+print(f"  AFTER: {len(after_edges_50)} edges")
+print(f"\n60% threshold:")
+print(f"  BEFORE: {len(before_edges_60)} edges")
+print(f"  AFTER: {len(after_edges_60)} edges")
+print(f"\n80% threshold:")
+print(f"  BEFORE: {len(before_edges_80)} edges")
+print(f"  AFTER: {len(after_edges_80)} edges")

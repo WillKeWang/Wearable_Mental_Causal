@@ -249,7 +249,7 @@ def get_ellipse_intersection(center, width, height, target_point):
     return (x, y)
 
 def create_hierarchical_layout(edges):
-    """Create a hierarchical layout with STAGGERED positions."""
+    """Create a hierarchical layout with DYNAMIC positioning based on present nodes."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
     all_nodes = set()
@@ -258,6 +258,24 @@ def create_hierarchical_layout(edges):
         all_nodes.add(target)
     
     wearable_vars = all_nodes - survey_vars
+    num_wearables = len(wearable_vars)
+    
+    # Adjust spacing based on number of variables
+    if num_wearables > 15:
+        base_col_spacing = 4.5
+        base_row_spacing = 3.5
+        x_scatter_range = 0.6
+        y_scatter_range = 1.5
+    elif num_wearables > 10:
+        base_col_spacing = 3.8
+        base_row_spacing = 3.0
+        x_scatter_range = 0.5
+        y_scatter_range = 1.2
+    else:
+        base_col_spacing = 3.0
+        base_row_spacing = 2.5
+        x_scatter_range = 0.3
+        y_scatter_range = 1.0
     
     # Group wearables by category
     sleep_vars = sorted([v for v in wearable_vars if any(x in v for x in ['deep', 'rem', 'light', 'awake', 'efficiency', 'onset'])])
@@ -265,55 +283,151 @@ def create_hierarchical_layout(edges):
     breath_vars = sorted([v for v in wearable_vars if 'breath' in v])
     temp_vars = sorted([v for v in wearable_vars if 'temperature' in v or 'temp' in v])
     
+    # Filter out empty categories
+    categories = []
+    if sleep_vars:
+        categories.append(('sleep', sleep_vars))
+    if hr_vars:
+        categories.append(('hr', hr_vars))
+    if breath_vars:
+        categories.append(('breath', breath_vars))
+    if temp_vars:
+        categories.append(('temp', temp_vars))
+    
     positions = {}
     
     # Position survey variables at top center
+    survey_present = []
     if 'promis_dep_sum' in all_nodes:
-        positions['promis_dep_sum'] = (10, 18)
+        survey_present.append('promis_dep_sum')
     if 'promis_anx_sum' in all_nodes:
-        positions['promis_anx_sum'] = (10, 16)
+        survey_present.append('promis_anx_sum')
     
-    y_base = 12
-    x_positions = {
-        'sleep': (2, y_base),
-        'hr': (8, y_base - 4),
-        'breath': (14, y_base - 4),
-        'temp': (20, y_base)
-    }
+    # Adjust canvas size based on number of nodes
+    if num_wearables > 15:
+        canvas_width = 36
+        x_center = 18
+    elif num_wearables > 10:
+        canvas_width = 30
+        x_center = 15
+    else:
+        canvas_width = 24
+        x_center = 12
     
-    # STAGGERED positioning with alternating y-offsets
-    for i, var in enumerate(sleep_vars):
-        x_offset = (i % 3) * 3.5
-        y_offset = (i // 3) * -2.8
-        # Add stagger: alternate between +0.3 and -0.3
-        stagger = 0.4 * (1 if i % 2 == 0 else -1)
-        positions[var] = (x_positions['sleep'][0] + x_offset, x_positions['sleep'][1] + y_offset + stagger)
+    # Center survey variables
+    if len(survey_present) == 2:
+        positions['promis_dep_sum'] = (x_center, 17)
+        positions['promis_anx_sum'] = (x_center, 15)
+    elif len(survey_present) == 1:
+        positions[survey_present[0]] = (x_center, 16)
     
-    for i, var in enumerate(hr_vars):
-        x_offset = (i % 2) * 3.5
-        y_offset = (i // 2) * -2.8
-        stagger = 0.4 * (1 if i % 2 == 0 else -1)
-        positions[var] = (x_positions['hr'][0] + x_offset, x_positions['hr'][1] + y_offset + stagger)
+    # If no wearable variables, return early
+    if not categories:
+        return positions, canvas_width
     
-    for i, var in enumerate(breath_vars):
-        x_offset = (i % 2) * 3.5
-        y_offset = (i // 2) * -2.8
-        stagger = 0.4 * (1 if i % 2 == 0 else -1)
-        positions[var] = (x_positions['breath'][0] + x_offset, x_positions['breath'][1] + y_offset + stagger)
+    # Calculate dynamic positioning for wearable categories
+    num_categories = len(categories)
     
-    for i, var in enumerate(temp_vars):
-        x_offset = (i % 2) * 3.5
-        y_offset = (i // 2) * -2.8
-        stagger = 0.4 * (1 if i % 2 == 0 else -1)
-        positions[var] = (x_positions['temp'][0] + x_offset, x_positions['temp'][1] + y_offset + stagger)
+    # Distribute categories evenly across horizontal space with margins
+    margin = canvas_width * 0.1
+    usable_width = canvas_width - 2 * margin, canvas_width
     
-    return positions
+    # Calculate dynamic positioning for wearable categories
+    num_categories = len(categories)
+    
+    # Distribute categories evenly across horizontal space with margins
+    margin = canvas_width * 0.1
+    usable_width = canvas_width - 2 * margin
+    
+    if num_categories == 1:
+        x_starts = [x_center]
+    elif num_categories == 2:
+        x_starts = [margin + usable_width * 0.25, margin + usable_width * 0.75]
+    elif num_categories == 3:
+        x_starts = [margin + usable_width * 0.17, margin + usable_width * 0.5, margin + usable_width * 0.83]
+    else:  # 4 categories
+        x_starts = [margin + usable_width * 0.125, margin + usable_width * 0.375, 
+                    margin + usable_width * 0.625, margin + usable_width * 0.875]
+    
+    y_start = 11
+    
+    # Use a hash-based approach for consistent but scattered positioning
+    def get_scatter(var_name, i):
+        """Generate consistent scatter based on variable name and index."""
+        hash_val = hash(var_name + str(i))
+        y_scatter = (hash_val % 100) / 50.0 - 1.0  # Range: -1.0 to 1.0
+        x_scatter = ((hash_val // 100) % 60) / 100.0 - 0.3  # Range: -0.3 to 0.3
+        return x_scatter * x_scatter_range / 0.3, y_scatter * y_scatter_range / 1.0
+    
+    # Position each category's variables
+    for cat_idx, (cat_name, cat_vars) in enumerate(categories):
+        x_base = x_starts[cat_idx]
+        num_vars = len(cat_vars)
+        
+        # Special case: very few variables (2-3) - arrange horizontally
+        if num_wearables <= 3:
+            for i, var in enumerate(cat_vars):
+                x = x_base + (i - (num_vars - 1) / 2) * base_col_spacing * 1.5
+                y = y_start
+                
+                # Add scatter
+                x_scatter, y_scatter = get_scatter(var, i)
+                # Reduce vertical scatter for horizontal arrangement
+                positions[var] = (x + x_scatter, y + y_scatter * 0.3)
+        else:
+            # Calculate grid dimensions for this category
+            if num_vars <= 2:
+                cols = 1
+                col_spacing = 0
+            elif num_vars <= 6:
+                cols = 2
+                col_spacing = base_col_spacing
+            else:
+                cols = 3
+                col_spacing = base_col_spacing
+            
+            rows = (num_vars + cols - 1) // cols
+            
+            # Center the grid horizontally
+            grid_width = (cols - 1) * col_spacing
+            x_offset_start = -grid_width / 2
+            
+            # Adjust vertical spacing
+            row_spacing = base_row_spacing
+            
+            for i, var in enumerate(cat_vars):
+                col = i % cols
+                row = i // cols
+                
+                x = x_base + x_offset_start + col * col_spacing
+                y = y_start - row * row_spacing
+                
+                # Add significant scatter to avoid linear arrangements
+                x_scatter, y_scatter = get_scatter(var, i)
+                
+                # Extra separation for breath variables
+                if 'breath' in var and 'breath_average' in var:
+                    if 'std' in var:
+                        x_scatter += 0.5
+                    elif 'mean' in var:
+                        x_scatter -= 0.5
+                
+                positions[var] = (x + x_scatter, y + y_scatter)
+    
+    return positions, canvas_width
 
 def create_clean_hierarchical_plot(edges, title, ax):
     """Create hierarchical network visualization with arrows to circumference."""
     survey_vars = {'promis_dep_sum', 'promis_anx_sum'}
     
-    pos = create_hierarchical_layout(edges)
+    # Get number of nodes for this graph
+    all_nodes = set()
+    for (source, target) in edges.keys():
+        all_nodes.add(source)
+        all_nodes.add(target)
+    num_nodes = len(all_nodes)
+    
+    pos, canvas_width = create_hierarchical_layout(edges)
     
     # Store ellipse sizes for intersection calculation
     ellipse_sizes = {}
@@ -386,11 +500,15 @@ def create_clean_hierarchical_plot(edges, title, ax):
         )
         ax.add_patch(arrow)
     
-    ax.set_xlim(-2, 26)
-    ax.set_ylim(-2, 20)
+    # Dynamic axis limits with padding
+    padding = 2
+    ax.set_xlim(-padding, canvas_width + padding)
+    ax.set_ylim(-padding, 20)
     ax.set_aspect('equal')
     ax.axis('off')
     ax.set_title(title, fontsize=12, fontweight='bold', pad=15)
+    
+    return num_nodes
 
 # Target variables
 target_vars = {'promis_dep_sum', 'promis_anx_sum'}
@@ -405,8 +523,33 @@ after_edges_60 = filter_edges_by_threshold_then_relevance(after_edges_full, targ
 before_edges_80 = filter_edges_by_threshold_then_relevance(before_edges_full, target_vars, 80, 'before')
 after_edges_80 = filter_edges_by_threshold_then_relevance(after_edges_full, target_vars, 80, 'after')
 
-# Create figures with FIXED TITLE SPACING
-fig1, axes1 = plt.subplots(2, 1, figsize=(20, 22))
+# Helper function to count nodes in edges
+def count_nodes(edges):
+    """Count unique nodes in edge dictionary."""
+    nodes = set()
+    for (source, target) in edges.keys():
+        nodes.add(source)
+        nodes.add(target)
+    return len(nodes)
+
+# Helper function to determine figure size
+def get_figure_size(num_nodes):
+    """Determine appropriate figure size based on number of nodes."""
+    if num_nodes > 15:
+        return (28, 24)
+    elif num_nodes > 10:
+        return (24, 22)
+    else:
+        return (20, 22)
+
+# Create figures with DYNAMIC sizing based on node count
+# 50% threshold
+n_before_50 = count_nodes(before_edges_50)
+n_after_50 = count_nodes(after_edges_50)
+max_nodes_50 = max(n_before_50, n_after_50)
+figsize_50 = get_figure_size(max_nodes_50)
+
+fig1, axes1 = plt.subplots(2, 1, figsize=figsize_50)
 fig1.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥50%)',
              fontsize=16, fontweight='bold', y=0.985)
 
@@ -420,8 +563,13 @@ create_clean_hierarchical_plot(after_edges_50,
 plt.tight_layout(rect=[0, 0, 1, 0.98])
 plt.savefig('causal_graph_50pct.png', dpi=300, bbox_inches='tight')
 
-# Create 60% threshold figure
-fig2, axes2 = plt.subplots(2, 1, figsize=(20, 22))
+# 60% threshold
+n_before_60 = count_nodes(before_edges_60)
+n_after_60 = count_nodes(after_edges_60)
+max_nodes_60 = max(n_before_60, n_after_60)
+figsize_60 = get_figure_size(max_nodes_60)
+
+fig2, axes2 = plt.subplots(2, 1, figsize=figsize_60)
 fig2.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥60%)',
              fontsize=16, fontweight='bold', y=0.985)
 
@@ -435,8 +583,13 @@ create_clean_hierarchical_plot(after_edges_60,
 plt.tight_layout(rect=[0, 0, 1, 0.98])
 plt.savefig('causal_graph_60pct.png', dpi=300, bbox_inches='tight')
 
-# Create 80% threshold figure
-fig3, axes3 = plt.subplots(2, 1, figsize=(20, 22))
+# 80% threshold
+n_before_80 = count_nodes(before_edges_80)
+n_after_80 = count_nodes(after_edges_80)
+max_nodes_80 = max(n_before_80, n_after_80)
+figsize_80 = get_figure_size(max_nodes_80)
+
+fig3, axes3 = plt.subplots(2, 1, figsize=figsize_80)
 fig3.suptitle('Temporal Causal Discovery: Relevant Pathways (Edges ≥80%)',
              fontsize=16, fontweight='bold', y=0.985)
 
@@ -454,11 +607,11 @@ plt.show()
 
 # Print statistics
 print(f"\n50% threshold:")
-print(f"  BEFORE: {len(before_edges_50)} edges")
-print(f"  AFTER: {len(after_edges_50)} edges")
+print(f"  BEFORE: {len(before_edges_50)} edges, {n_before_50} nodes")
+print(f"  AFTER: {len(after_edges_50)} edges, {n_after_50} nodes")
 print(f"\n60% threshold:")
-print(f"  BEFORE: {len(before_edges_60)} edges")
-print(f"  AFTER: {len(after_edges_60)} edges")
+print(f"  BEFORE: {len(before_edges_60)} edges, {n_before_60} nodes")
+print(f"  AFTER: {len(after_edges_60)} edges, {n_after_60} nodes")
 print(f"\n80% threshold:")
-print(f"  BEFORE: {len(before_edges_80)} edges")
-print(f"  AFTER: {len(after_edges_80)} edges")
+print(f"  BEFORE: {len(before_edges_80)} edges, {n_before_80} nodes")
+print(f"  AFTER: {len(after_edges_80)} edges, {n_after_80} nodes")
