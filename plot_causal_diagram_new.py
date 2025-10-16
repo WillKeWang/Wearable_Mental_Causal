@@ -145,6 +145,8 @@ after_edges_full = {
     ('light_std', 'temperature_max_std'): 50,
 }
 
+# TODO: add function to read edges file from causal_discovery output
+
 def find_ancestors(target_nodes, edges):
     """Find all ancestors (nodes with paths to target) in directed graph."""
     ancestors = set(target_nodes)
