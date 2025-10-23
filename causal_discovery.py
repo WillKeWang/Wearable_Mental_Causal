@@ -12,6 +12,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from contextlib import redirect_stdout, redirect_stderr
 import os
+import json
 
 from causallearn.search.ConstraintBased.PC import pc
 from causallearn.utils.cit import fisherz
@@ -333,8 +334,6 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
             
         except Exception as e:
             continue
-    
-    # TODO: Yishu to add another function to report the entire edge list with frequencies
 
     return {
         'edge_counts': edge_counts,
@@ -398,108 +397,133 @@ def create_background_knowledge(feature_names, base_vars, dataset_type='before')
     return bk
 
 
-def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=0.5, alpha=0.05, 
-                          use_pid_bootstrap=True, use_first_survey=True):
+def analyze_single_dataset(filepath, dataset_name, n_bootstrap, sample_frac, alpha,
+                          use_pid_bootstrap, use_first_survey):
     """
-    Analyze a single dataset with PC algorithm.
+    Analyze a single dataset.
     
     Args:
         filepath: Path to dataset file
-        dataset_name: Name for display purposes
+        dataset_name: Name for display and file naming
         n_bootstrap: Number of bootstrap iterations
-        sample_frac: Fraction of data/participants to sample
+        sample_frac: Fraction to sample
         alpha: Significance level
-        use_pid_bootstrap: If True, use pid-level bootstrapping
-        use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
+        use_pid_bootstrap: Whether to use PID-level bootstrapping
+        use_first_survey: Whether to use only first surveys
         
     Returns:
-        Dictionary with analysis results, or None if data loading fails
+        Analysis results dictionary
     """
-    # Load and prepare data
+    print(f"\n{'='*60}")
+    print(f"DATASET: {dataset_name}")
+    print(f"{'='*60}")
+    
+    # Load data
     df = load_and_prepare_data(filepath, dataset_name)
     if df is None:
         return None
     
-    base_vars = ["promis_dep_sum", "promis_anx_sum"]
-    
-    # Infer dataset type from name or path
+    # Infer dataset type
     dataset_type = infer_dataset_type(dataset_name)
     
+    # Prepare variables
+    base_vars = ["promis_dep_sum", "promis_anx_sum"]
+    
     if use_pid_bootstrap:
-        # Prepare feature names (excluding pid which we'll handle separately)
-        metric_cols = [c for c in df.columns if c.endswith("_mean") or c.endswith("_std")]
-        feature_names = base_vars + metric_cols
-        feature_names = [c for c in feature_names if not c.startswith("total_")]
+        # Need to keep pid for bootstrapping
+        cols, X, pids = prepare_variables(df, keep_pid=True)
+        df_with_features = df[cols + ['pid']].copy()
         
-        # Run PID-level bootstrap analysis
-        results = bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, 
-                                              n_bootstrap, sample_frac, alpha, 
-                                              use_first_survey, dataset_type)
+        result = bootstrap_pc_analysis_by_pid(
+            df_with_features, cols, base_vars,
+            n_bootstrap=n_bootstrap,
+            sample_frac=sample_frac,
+            alpha=alpha,
+            use_first_survey=use_first_survey,
+            dataset_type=dataset_type
+        )
     else:
-        # Prepare variables (original method)
-        feature_names, X = prepare_variables(df, keep_pid=False)
-        
-        # Note: Original row-level bootstrap doesn't use dataset_type
-        # Would need to be added if needed
-        results = bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap, sample_frac, alpha)
-        results['dataset_type'] = dataset_type
+        # Row-level bootstrap not implemented in original
+        raise NotImplementedError("Row-level bootstrap not supported in this version")
     
-    return results
+    result['dataset_name'] = dataset_name
+    result['n_bootstrap'] = n_bootstrap
+    
+    return result
 
 
-def print_results(results, dataset_name, min_frequency=0.1):
+def save_edges_to_json(results, output_dir='data/edges'):
     """
-    Print results for a single dataset.
+    Save edge counts to JSON files named by dataset.
     
     Args:
-        results: Dictionary with analysis results
+        results: Dictionary mapping dataset names to analysis results
+        output_dir: Directory for saving JSON files
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    for dataset_name, result in results.items():
+        if result is None:
+            continue
+        
+        # Create safe filename from dataset name
+        safe_name = dataset_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
+        output_file = os.path.join(output_dir, f"{safe_name}_edges.json")
+        
+        # Convert edge tuples to strings for JSON
+        # IMPORTANT: edge tuples already have the actual variable names with correct temporal direction
+        edge_counts_str = {}
+        for edge, count in result['edge_counts'].items():
+            # edge is already a tuple like ('rem_std', 'promis_dep_sum') for BEFORE
+            # or ('promis_dep_sum', 'rem_std') for AFTER
+            edge_key = f"{edge[0]} -> {edge[1]}"
+            edge_counts_str[edge_key] = count
+        
+        # Prepare data to save
+        output_data = {
+            'dataset_name': dataset_name,
+            'dataset_type': result.get('dataset_type'),
+            'successful_iterations': result['successful_iterations'],
+            'edges': edge_counts_str
+        }
+        
+        # Save to JSON
+        with open(output_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        print(f"Saved edges to: {output_file}")
+
+
+def print_results(result, dataset_name, min_frequency=0.1, outcome_vars=None):
+    """
+    Print analysis results for a dataset.
+    
+    Args:
+        result: Analysis result dictionary
         dataset_name: Name of dataset
-        min_frequency: Minimum frequency threshold to display edge (default 0.1 = 10%)
+        min_frequency: Minimum frequency threshold to display
+        outcome_vars: List of outcome variables
     """
-    if results:
-        total = results['successful_iterations']
-        rem_dep = results['rem_dep_count']
-        deep_dep = results['deep_dep_count']
-        anx_dep = results['anxiety_dep_count']
-        dataset_type = results.get('dataset_type')
-        corrections = results.get('direction_corrections', 0)
-        
-        # FIXED: Print correct direction based on dataset type
-        print(f"\n{dataset_name}:")
-        if dataset_type == 'after':
-            print(f"  promis_dep_sum -> rem_std: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-            print(f"  promis_dep_sum -> deep_std: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
-        else:  # 'before' or default
-            print(f"  rem_std -> promis_dep_sum: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
-            print(f"  deep_std -> promis_dep_sum: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
-        print(f"  promis_anx_sum <-> promis_dep_sum: {anx_dep}/{total} ({anx_dep/total*100:.1f}%)")
-        
-        if corrections > 0:
-            print(f"  [Note: {corrections} survey-wearable edges were corrected to enforce temporal direction]")
-        
-        # Print all significant edges with temporal filtering
-        print_all_edges(results, min_frequency=min_frequency, dataset_type=dataset_type)
-
-
-def print_all_edges(results, min_frequency=0.1, dataset_type=None):
-    """
-    Print all edges that appeared across bootstrap iterations.
-    Filters edges based on temporal direction if dataset_type is specified.
-    
-    Args:
-        results: Dictionary with analysis results
-        min_frequency: Minimum frequency threshold to display (default 0.1 = 10%)
-        dataset_type: 'before' or 'after' to filter edges by temporal direction, None for no filtering
-    """
-    if not results or 'edge_counts' not in results:
+    if result is None:
+        print(f"\nNo results for {dataset_name}")
         return
     
-    total = results['successful_iterations']
-    edge_counts = results['edge_counts']
-    edge_types = results.get('edge_types', {})
-    outcome_vars = ['promis_dep_sum', 'promis_anx_sum']
+    if outcome_vars is None:
+        outcome_vars = ['promis_dep_sum', 'promis_anx_sum']
     
-    # Filter edges by minimum frequency
+    print(f"\n{'='*60}")
+    print(f"RESULTS: {dataset_name}")
+    print(f"{'='*60}")
+    
+    dataset_type = result.get('dataset_type')
+    edge_counts = result['edge_counts']
+    edge_types = result.get('edge_types', {})
+    total = result['successful_iterations']
+    
+    print(f"Successful bootstrap iterations: {total}")
+    print(f"Total unique edges found: {len(edge_counts)}")
+    
+    # Filter edges by frequency
     significant_edges = {edge: count for edge, count in edge_counts.items() 
                         if count / total >= min_frequency}
     
@@ -655,7 +679,8 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
 
 
 def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, alpha=0.05,
-                            use_pid_bootstrap=True, use_first_survey=True, min_frequency=0.1):
+                            use_pid_bootstrap=True, use_first_survey=True, min_frequency=0.1,
+                            save_edges=True, output_dir='data/edges'):
     """
     Run temporal causal discovery analysis using PC algorithm on multiple datasets.
     
@@ -667,6 +692,8 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
         use_pid_bootstrap: If True, use pid-level bootstrapping; if False, use row-level
         use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
         min_frequency: Minimum frequency threshold to display edges (default 0.1 = 10%)
+        save_edges: If True, save edge results to JSON files
+        output_dir: Directory to save JSON files (default 'data/edges')
         
     Returns:
         Dictionary mapping dataset names to analysis results
@@ -686,12 +713,19 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
         results[name] = analyze_single_dataset(path, name, n_bootstrap, sample_frac, alpha,
                                               use_pid_bootstrap, use_first_survey)
     
+    # Save edges to JSON files
+    if save_edges:
+        print(f"\n{'='*60}")
+        print("SAVING EDGE RESULTS")
+        print(f"{'='*60}")
+        
+        save_edges_to_json(results, output_dir=output_dir)
+    
     # Compare results
     compare_temporal_results(results, min_frequency=min_frequency)
     
     return results
 
-# TODO: Add function to count and report the entire edge list with frequencies 
 
 # Example usage
 if __name__ == "__main__":
@@ -703,6 +737,7 @@ if __name__ == "__main__":
     
     # Run analysis with PID-level bootstrapping on first surveys
     # min_frequency=0.1 means only show edges that appear in >=10% of iterations
+    # save_edges=True will save results to JSON files
     results = run_temporal_pc_analysis(
         dataset_paths,
         n_bootstrap=100,
@@ -710,5 +745,7 @@ if __name__ == "__main__":
         alpha=0.05,
         use_pid_bootstrap=True,
         use_first_survey=True,
-        min_frequency=0.1
+        min_frequency=0.1,
+        save_edges=True,
+        output_dir='data/edges'
     )
