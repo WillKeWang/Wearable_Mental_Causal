@@ -480,10 +480,10 @@ def create_visualizations(before_edges_full, after_edges_full,
                     fontsize=16, fontweight='bold', y=0.985)
         
         create_clean_hierarchical_plot(before_edges,
-                                      'BEFORE (6-2 weeks before) | Wearable → Survey',
+                                      f"BEFORE {before_dataset_name} | Wearable → Survey",
                                       axes[0])
         create_clean_hierarchical_plot(after_edges,
-                                      'AFTER (1-5 weeks after) | Survey → Wearable',
+                                      f"AFTER {after_dataset_name} | Survey → Wearable",
                                       axes[1])
         
         plt.tight_layout(rect=[0, 0, 1, 0.98])
@@ -516,7 +516,7 @@ def create_visualizations(before_edges_full, after_edges_full,
                                fontsize=14, fontweight='bold', y=0.98)
             
             create_clean_hierarchical_plot(before_edges,
-                                          'BEFORE (6-2 weeks before) | Wearable → Survey',
+                                          f"BEFORE {before_dataset_name} | Wearable → Survey",
                                           ax_before)
             
             plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -537,7 +537,7 @@ def create_visualizations(before_edges_full, after_edges_full,
                               fontsize=14, fontweight='bold', y=0.98)
             
             create_clean_hierarchical_plot(after_edges,
-                                          'AFTER (1-5 weeks after) | Survey → Wearable',
+                                          f"AFTER {after_dataset_name} | Survey → Wearable", 
                                           ax_after)
             
             plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -568,8 +568,8 @@ if __name__ == "__main__":
     
     try:
         before_edges_full, after_edges_full = load_edges_for_analysis(
-            before_dataset_name='6w_to_2w_before',
-            after_dataset_name='1w_to_5w_after',
+            before_dataset_name='4w_to_0w_before',
+            after_dataset_name='0w_to_4w_after',
             edges_dir='data/edges'
         )
         
@@ -577,8 +577,8 @@ if __name__ == "__main__":
         create_visualizations(
             before_edges_full=before_edges_full,
             after_edges_full=after_edges_full,
-            before_dataset_name='6w_to_2w_before',
-            after_dataset_name='1w_to_5w_after',
+            before_dataset_name='4w_to_0w_before',
+            after_dataset_name='0w_to_4w_after',
             thresholds=[50, 60, 70, 80],
             output_dir='test_figures'
         )
