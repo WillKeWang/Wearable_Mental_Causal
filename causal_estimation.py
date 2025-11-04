@@ -1,9 +1,11 @@
 """
 Causal Effects Estimation using Linear Mixed Effects Models
 ===========================================================
-OPTIMIZED VERSION with:
+IMPROVED VERSION with:
 1. Fast PSM using sklearn NearestNeighbors (O(n log n) instead of O(n²))
-2. PSM done once before bootstrap (not inside loop)
+2. Prevents same-pid matching for between-subject effects
+3. Includes adjustment covariates in LMM for residual balance
+4. Pair-level bootstrapping to preserve matched structure
 """
 
 import pandas as pd
@@ -87,12 +89,16 @@ def create_treatment_groups(df, treatment_var, percentile_threshold=50):
     return df
 
 
-def propensity_score_matching(df, treatment_var, outcome_var, covariates, caliper=0.1):
+def propensity_score_matching(df, treatment_var, outcome_var, covariates, 
+                              caliper=0.1, subject_var='pid'):
     """
     FAST propensity score matching using sklearn NearestNeighbors.
     
+    IMPROVEMENTS:
+    - Prevents same-pid matching for between-subject effects
+    - Assigns pair_id for pair-level bootstrapping
+    
     Speed: O(n log n) using ball tree instead of O(n²) nested loops.
-    This is 100-1000x faster for large datasets.
     """
     print(f"\n{'='*70}")
     print("Fast Propensity Score Matching")
@@ -133,6 +139,10 @@ def propensity_score_matching(df, treatment_var, outcome_var, covariates, calipe
     treated_ps = treated_df['ps_score'].values.reshape(-1, 1)
     control_ps = control_df['ps_score'].values.reshape(-1, 1)
     
+    # Extract PIDs for same-participant check
+    treated_pids = treated_df[subject_var].values
+    control_pids = control_df[subject_var].values
+    
     print(f"\nTreated group: {len(treated_df)} observations")
     print(f"Control group: {len(control_df)} observations")
     
@@ -157,9 +167,15 @@ def propensity_score_matching(df, treatment_var, outcome_var, covariates, calipe
     # Sort by distance to prioritize best matches
     match_order = np.argsort(distances)
     
+    same_pid_skipped = 0
     for i in match_order:
         distance = distances[i]
         control_idx = indices[i]
+        
+        # IMPROVEMENT: Prevent same-pid matching
+        if control_pids[control_idx] == treated_pids[i]:
+            same_pid_skipped += 1
+            continue  # skip if treated and control belong to the same pid
         
         # Check caliper and if control already used
         if distance <= caliper_value and control_idx not in used_controls:
@@ -170,7 +186,7 @@ def propensity_score_matching(df, treatment_var, outcome_var, covariates, calipe
             ))
             used_controls.add(control_idx)
     
-    print(f"Matched {len(matched_pairs)} pairs")
+    print(f"Matched {len(matched_pairs)} pairs (skipped {same_pid_skipped} same-pid potential matches)")
     
     # Create matched dataset
     matched_indices = []
@@ -178,6 +194,13 @@ def propensity_score_matching(df, treatment_var, outcome_var, covariates, calipe
         matched_indices.extend([t_idx, c_idx])
     
     matched_df = df.loc[matched_indices].copy()
+    
+    # IMPROVEMENT: Assign pair_id for pair-level bootstrapping
+    pair_id_map = {}
+    for k, (t_idx, c_idx) in enumerate(matched_pairs):
+        pair_id_map[t_idx] = k
+        pair_id_map[c_idx] = k
+    matched_df['pair_id'] = matched_df.index.map(pair_id_map)
     
     elapsed = time.time() - start_time
     print(f"Matched dataset: {len(matched_df)} observations from {matched_df['pid'].nunique()} participants")
@@ -215,15 +238,42 @@ def check_covariate_balance(df, covariates):
         print(f"{status} {covar:25s}: SMD = {smd:6.3f} (T:{mean_t:7.3f}, C:{mean_c:7.3f})")
 
 
-def estimate_effect_lmm(df, treatment_var, outcome_var, subject_var='pid'):
-    """Estimate treatment effect using Linear Mixed Effects Model."""
-    # Prepare data
-    df_model = df[['treated', outcome_var, subject_var]].copy()
-    df_model = df_model.dropna()
+def estimate_effect_lmm(df, treatment_var, outcome_var, adjustment_set=None, subject_var='pid'):
+    """
+    Estimate treatment effect using Linear Mixed Effects Model.
     
-    # Fit LMM: outcome ~ treated + (1|subject)
+    IMPROVEMENT: Includes adjustment covariates in the model to account for
+    residual imbalance and improve estimation efficiency.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input (matched) data.
+    treatment_var : str
+        Column name for the treatment variable (assumes 'treated' column exists).
+    outcome_var : str
+        Column name for the outcome.
+    adjustment_set : list[str] or None
+        List of covariate names to include as fixed effects (same as used in PSM).
+    subject_var : str
+        Column name for the grouping factor (random intercept), default 'pid'.
+    """
+    # Build the modeling frame with required columns
+    cols = ['treated', outcome_var, subject_var]
+    if adjustment_set:
+        cols += adjustment_set
+    df_model = df[cols].copy().dropna()
+    
+    # Build formula: include adjustment covariates if provided
+    if adjustment_set and len(adjustment_set) > 0:
+        fe_terms = " + ".join(adjustment_set)
+        formula = f"{outcome_var} ~ treated + {fe_terms}"
+    else:
+        formula = f"{outcome_var} ~ treated"
+    
+    # Fit LMM: outcome ~ treated + covariates + (1|subject)
     model = MixedLM.from_formula(
-        f'{outcome_var} ~ treated',
+        formula,
         data=df_model,
         groups=df_model[subject_var]
     )
@@ -257,35 +307,60 @@ def estimate_effect_lmm(df, treatment_var, outcome_var, subject_var='pid'):
 
 
 def bootstrap_analysis(df_matched, treatment_var, outcome_var, 
-                       n_bootstrap=100, sample_frac=0.8, subject_var='pid'):
+                       adjustment_set=None, n_bootstrap=100, sample_frac=0.8, 
+                       subject_var='pid'):
     """
     Bootstrap analysis on ALREADY MATCHED data.
-    No matching happens here - only resampling and estimation.
+    
+    IMPROVEMENT: Resamples at the matched-pair level (pair_id) to preserve 
+    the one-to-one matching structure across bootstrap iterations.
+    
+    Parameters
+    ----------
+    df_matched : pd.DataFrame
+        Matched dataset with 'pair_id' column.
+    treatment_var : str
+        Treatment variable name.
+    outcome_var : str
+        Outcome variable name.
+    adjustment_set : list[str] or None
+        Covariates to include in LMM.
+    n_bootstrap : int
+        Number of bootstrap iterations.
+    sample_frac : float
+        Fraction of pairs to sample in each iteration.
+    subject_var : str
+        Subject identifier for random effects.
     """
     print(f"\n{'='*70}")
     print(f"Bootstrap Analysis on Matched Data ({n_bootstrap} iterations)")
     print(f"{'='*70}")
     
     bootstrap_results = []
-    unique_subjects = df_matched[subject_var].unique()
-    n_subjects = len(unique_subjects)
     
-    print(f"Starting bootstrap with {n_subjects} participants, {len(df_matched)} observations")
+    # IMPROVEMENT: Resample by matched pairs, not by subjects
+    unique_pairs = df_matched['pair_id'].unique()
+    n_pairs = len(unique_pairs)
+    
+    print(f"Starting bootstrap with {n_pairs} matched pairs, {len(df_matched)} observations")
+    if adjustment_set:
+        print(f"Including adjustment covariates in LMM: {adjustment_set}")
     
     for i in tqdm(range(n_bootstrap), desc="Bootstrapping"):
-        # Sample participants with replacement
-        n_sample = int(n_subjects * sample_frac)
-        sampled_subjects = np.random.choice(unique_subjects, size=n_sample, replace=True)
+        # Sample matched pairs with replacement
+        n_sample_pairs = int(n_pairs * sample_frac)
+        sampled_pairs = np.random.choice(unique_pairs, size=n_sample_pairs, replace=True)
         
-        # Get data for sampled participants
-        df_boot = df_matched[df_matched[subject_var].isin(sampled_subjects)].copy()
+        # Keep all observations belonging to the sampled pairs
+        df_boot = df_matched[df_matched['pair_id'].isin(sampled_pairs)].copy()
         
         if len(df_boot) < 20:
             continue
         
         try:
-            # Estimate effect using LMM
-            result = estimate_effect_lmm(df_boot, treatment_var, outcome_var, subject_var)
+            # Estimate effect using LMM (groups still by pid)
+            result = estimate_effect_lmm(df_boot, treatment_var, outcome_var, 
+                                        adjustment_set, subject_var)
             bootstrap_results.append(result)
             
         except Exception as e:
@@ -421,13 +496,15 @@ def run_causal_estimation(before_path, after_path,
     """
     Run the complete causal estimation analysis.
     
-    OPTIMIZED VERSION:
+    IMPROVEMENTS:
     - Fast PSM using sklearn NearestNeighbors
-    - PSM done once per dataset
-    - Bootstrap only for effect estimation
+    - Prevents same-pid matching
+    - Includes covariates in LMM
+    - Pair-level bootstrapping
+    - Consistent handling of both before/after cases
     """
     print("\n" + "="*70)
-    print("CAUSAL EFFECTS ESTIMATION - OPTIMIZED VERSION")
+    print("CAUSAL EFFECTS ESTIMATION - IMPROVED VERSION")
     print("="*70)
     
     # Load and prepare data
@@ -449,12 +526,19 @@ def run_causal_estimation(before_path, after_path,
     print(f"Covariates: {before_covariates}")
     
     df_before = create_treatment_groups(df_before, before_treatment)
-    df_before_matched = propensity_score_matching(
-        df_before, before_treatment, before_outcome, before_covariates, caliper=0.1
-    )
+    
+    # IMPROVEMENT: Consistent handling with after case
+    if before_covariates:
+        df_before_matched = propensity_score_matching(
+            df_before, before_treatment, before_outcome, before_covariates, caliper=0.1
+        )
+    else:
+        df_before_matched = df_before
+        print("\nNo covariates specified - using full dataset")
     
     before_summary = bootstrap_analysis(
-        df_before_matched, before_treatment, before_outcome, n_bootstrap=n_bootstrap
+        df_before_matched, before_treatment, before_outcome, 
+        adjustment_set=before_covariates, n_bootstrap=n_bootstrap
     )
     
     if before_summary:
@@ -481,7 +565,8 @@ def run_causal_estimation(before_path, after_path,
         print("\nNo covariates specified - using full dataset")
     
     after_summary = bootstrap_analysis(
-        df_after_matched, after_treatment, after_outcome, n_bootstrap=n_bootstrap
+        df_after_matched, after_treatment, after_outcome, 
+        adjustment_set=after_covariates, n_bootstrap=n_bootstrap
     )
     
     if after_summary:

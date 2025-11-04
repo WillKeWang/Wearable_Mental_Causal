@@ -21,16 +21,202 @@ from causallearn.graph.GraphNode import GraphNode
 warnings.filterwarnings('ignore')
 
 
-def load_and_prepare_data(filepath, dataset_name):
+def encode_sex(sex_value):
+    """
+    Encode sex as binary numeric (0=female, 1=male).
+    
+    Args:
+        sex_value: 'female', 'male', or other string
+        
+    Returns:
+        0 for female, 1 for male, np.nan for others
+    """
+    if pd.isna(sex_value):
+        return np.nan
+    sex_lower = str(sex_value).lower().strip()
+    if sex_lower == 'female':
+        return 0
+    elif sex_lower == 'male':
+        return 1
+    else:
+        return np.nan
+
+
+def encode_race_grouped(race_value):
+    """
+    Encode race into grouped categories:
+    0 = white
+    1 = asian (includes asian, south_asian)
+    2 = black (includes black, african)
+    3 = other (includes ethnic_other, multiple, middle_eastern, native_hawaiian, native_american)
+    
+    Args:
+        race_value: Race string from dataset
+        
+    Returns:
+        Numeric code 0-3, or np.nan for missing
+    """
+    if pd.isna(race_value):
+        return np.nan
+    
+    race_lower = str(race_value).lower().strip()
+    
+    if race_lower == 'white':
+        return 0
+    elif race_lower in ['asian', 'south_asian']:
+        return 1
+    elif race_lower in ['black', 'african']:
+        return 2
+    else:  # ethnic_other, multiple, middle_eastern, native_hawaiian, native_american
+        return 3
+
+
+def encode_race_detailed(race_value):
+    """
+    Encode race with more detailed categories:
+    0 = white
+    1 = asian
+    2 = black
+    3 = south_asian
+    4 = multiple
+    5 = other (ethnic_other, middle_eastern, native_hawaiian, native_american, african)
+    
+    Args:
+        race_value: Race string from dataset
+        
+    Returns:
+        Numeric code 0-5, or np.nan for missing
+    """
+    if pd.isna(race_value):
+        return np.nan
+    
+    race_lower = str(race_value).lower().strip()
+    
+    race_map = {
+        'white': 0,
+        'asian': 1,
+        'black': 2,
+        'south_asian': 3,
+        'multiple': 4
+    }
+    
+    if race_lower in race_map:
+        return race_map[race_lower]
+    else:
+        return 5  # other
+
+
+def encode_ethnicity(ethnicity_value):
+    """
+    Encode hispanic ethnicity as binary:
+    0 = not hispanic (False)
+    1 = hispanic (True)
+    np.nan = skipped or missing
+    
+    Args:
+        ethnicity_value: True, False, 'skipped', or other
+        
+    Returns:
+        0, 1, or np.nan
+    """
+    if pd.isna(ethnicity_value):
+        return np.nan
+    
+    # Handle boolean values
+    if isinstance(ethnicity_value, bool):
+        return 1 if ethnicity_value else 0
+    
+    # Handle string values
+    eth_lower = str(ethnicity_value).lower().strip()
+    if eth_lower in ['true', '1', 'yes']:
+        return 1
+    elif eth_lower in ['false', '0', 'no']:
+        return 0
+    else:  # 'skipped' or other
+        return np.nan
+
+
+def bin_age(age, bin_size=10):
+    """
+    Bin age into categories (e.g., 20s, 30s, 40s).
+    
+    Args:
+        age: Age value or Series
+        bin_size: Size of age bins in years (default 10)
+        
+    Returns:
+        Binned age category (e.g., 20 for ages 20-29, 30 for ages 30-39)
+    """
+    if pd.isna(age):
+        return np.nan
+    return int(age // bin_size) * bin_size
+
+
+def encode_demographics(df, bin_age_var=True, age_bin_size=10, race_encoding='grouped'):
+    """
+    Encode all demographic variables in the dataframe.
+    
+    Args:
+        df: DataFrame with demographic columns
+        bin_age_var: If True, bin age into categories
+        age_bin_size: Size of age bins in years (default 10)
+        race_encoding: 'grouped' (4 categories) or 'detailed' (6 categories)
+        
+    Returns:
+        DataFrame with encoded demographic variables added
+    """
+    df_encoded = df.copy()
+    
+    # Encode sex
+    if 'sex' in df.columns:
+        df_encoded['sex_encoded'] = df['sex'].apply(encode_sex)
+        print(f"Sex encoded: {df_encoded['sex_encoded'].value_counts().to_dict()}")
+    
+    # Encode and/or bin age
+    if 'age' in df.columns:
+        if bin_age_var:
+            df_encoded['age_binned'] = df['age'].apply(lambda x: bin_age(x, age_bin_size))
+            print(f"Age binned (size={age_bin_size}): {sorted(df_encoded['age_binned'].dropna().unique())}")
+        else:
+            # Keep continuous age as-is (already numeric)
+            df_encoded['age_continuous'] = pd.to_numeric(df['age'], errors='coerce')
+    
+    # Encode race
+    if 'race' in df.columns:
+        if race_encoding == 'grouped':
+            df_encoded['race_encoded'] = df['race'].apply(encode_race_grouped)
+            race_map_desc = {0: 'white', 1: 'asian', 2: 'black', 3: 'other'}
+        else:  # 'detailed'
+            df_encoded['race_encoded'] = df['race'].apply(encode_race_detailed)
+            race_map_desc = {0: 'white', 1: 'asian', 2: 'black', 3: 'south_asian', 4: 'multiple', 5: 'other'}
+        
+        print(f"Race encoded ({race_encoding}): {df_encoded['race_encoded'].value_counts().sort_index().to_dict()}")
+        print(f"  Mapping: {race_map_desc}")
+    
+    # Encode ethnicity
+    if 'ethnicity_hispanic' in df.columns:
+        df_encoded['ethnicity_encoded'] = df['ethnicity_hispanic'].apply(encode_ethnicity)
+        print(f"Ethnicity encoded: {df_encoded['ethnicity_encoded'].value_counts().to_dict()}")
+        print(f"  (0=not hispanic, 1=hispanic, NaN=skipped)")
+    
+    return df_encoded
+
+
+def load_and_prepare_data(filepath, dataset_name, include_demographics=True, 
+                         bin_age_var=True, age_bin_size=10, race_encoding='grouped'):
     """
     Load and prepare data.
     
     Args:
         filepath: Path to dataset file
         dataset_name: Name for display purposes
+        include_demographics: If True, encode and include demographic variables
+        bin_age_var: If True, bin age into categories (e.g., 20s, 30s)
+        age_bin_size: Size of age bins in years (default 10)
+        race_encoding: 'grouped' (4 categories) or 'detailed' (6 categories) for race
         
     Returns:
-        DataFrame with cleaned data, or None if file not found
+        DataFrame with cleaned and encoded data, or None if file not found
     """
     print(f"\nLoading {dataset_name}: {filepath}")
     
@@ -46,6 +232,29 @@ def load_and_prepare_data(filepath, dataset_name):
     
     print(f"Original shape: {df.shape}")
     
+    # Encode demographic variables if requested
+    if include_demographics:
+        print("\nEncoding demographic variables:")
+        available_demos = []
+        missing_demos = []
+        
+        # Check which demographic variables are available
+        for demo_var in ['age', 'sex', 'race', 'ethnicity_hispanic']:
+            if demo_var in df.columns:
+                available_demos.append(demo_var)
+            else:
+                missing_demos.append(demo_var)
+        
+        if missing_demos:
+            print(f"  Missing demographic variables: {missing_demos}")
+        
+        if not available_demos:
+            print("  No demographic variables found. Continuing without demographics...")
+            include_demographics = False
+        else:
+            # Encode all available demographic variables
+            df = encode_demographics(df, bin_age_var, age_bin_size, race_encoding)
+    
     # Cleaning for valid range of PROMIS scores
     cleaned_df = df.dropna(axis=0, how='any')
     cleaned_df = cleaned_df[cleaned_df['promis_dep_sum'] >= 4]
@@ -53,19 +262,21 @@ def load_and_prepare_data(filepath, dataset_name):
     cleaned_df = cleaned_df[cleaned_df['promis_dep_sum'] <= 20]
     cleaned_df = cleaned_df[cleaned_df['promis_anx_sum'] <= 20]
     
-    print(f"After cleaning: {cleaned_df.shape}")
+    print(f"\nAfter cleaning: {cleaned_df.shape}")
     print(f"Unique users: {cleaned_df['pid'].nunique()}")
     
     return cleaned_df
 
 
-def prepare_variables(df, keep_pid=False):
+def prepare_variables(df, keep_pid=False, include_demographics=True, use_binned_age=True):
     """
     Prepare variables and data matrix.
     
     Args:
-        df: Cleaned DataFrame
+        df: Cleaned DataFrame (with encoded demographics if applicable)
         keep_pid: If True, return pid column alongside data
+        include_demographics: If True, include demographic variables
+        use_binned_age: If True, use binned age instead of continuous age
         
     Returns:
         If keep_pid=False: Tuple of (column_names, data_matrix)
@@ -77,7 +288,39 @@ def prepare_variables(df, keep_pid=False):
     cols = base_vars + metric_cols
     cols = [c for c in cols if not c.startswith("total_")]  # Remove total_ variables
     
-    print(f"Selected {len(cols)} variables")
+    # Add demographic variables if requested
+    demographic_vars = []
+    if include_demographics:
+        # Age
+        if use_binned_age and 'age_binned' in df.columns:
+            demographic_vars.append('age_binned')
+        elif 'age_continuous' in df.columns:
+            demographic_vars.append('age_continuous')
+        elif 'age' in df.columns:
+            demographic_vars.append('age')
+        
+        # Sex
+        if 'sex_encoded' in df.columns:
+            demographic_vars.append('sex_encoded')
+        elif 'sex' in df.columns:
+            demographic_vars.append('sex')
+        
+        # Race
+        if 'race_encoded' in df.columns:
+            demographic_vars.append('race_encoded')
+        
+        # Ethnicity
+        if 'ethnicity_encoded' in df.columns:
+            demographic_vars.append('ethnicity_encoded')
+    
+    # Add demographics at the beginning (they causally precede everything)
+    cols = demographic_vars + cols
+    
+    print(f"\nSelected {len(cols)} variables:")
+    if demographic_vars:
+        print(f"  Demographic variables ({len(demographic_vars)}): {demographic_vars}")
+    print(f"  Outcome variables (2): {base_vars}")
+    print(f"  Wearable metrics ({len(metric_cols)}): {len([c for c in metric_cols if c not in cols[:len(demographic_vars) + 2]])} after filtering")
     
     # Create data matrix - FIXED: Don't convert pid to numeric
     if keep_pid:
@@ -146,8 +389,9 @@ def infer_dataset_type(name_or_path):
     return None
 
 
-def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, sample_frac=0.6, 
-                                 alpha=0.05, use_first_survey=True, dataset_type=None, verbose=False):
+def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, demographic_vars=None,
+                                 n_bootstrap=100, sample_frac=0.6, alpha=0.05, 
+                                 use_first_survey=True, dataset_type=None, verbose=False):
     """
     Run bootstrap analysis with PC algorithm, sampling at participant (pid) level.
     
@@ -155,6 +399,7 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
         df: DataFrame with cleaned data (must include 'pid' column)
         feature_names: List of variable names (excluding 'pid')
         base_vars: List of outcome variables
+        demographic_vars: List of demographic variables (age, sex) that can only be causes
         n_bootstrap: Number of bootstrap iterations
         sample_frac: Fraction of participants to sample in each iteration
         alpha: Significance level for independence tests
@@ -165,6 +410,9 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     Returns:
         Dictionary with edge counts and key edge results
     """
+    if demographic_vars is None:
+        demographic_vars = []
+    
     # Get first survey data if requested
     if use_first_survey:
         df_to_use = get_first_survey_per_participant(df)
@@ -176,6 +424,8 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
     n_pids = len(unique_pids)
     print(f"Total participants for sampling: {n_pids}")
     print(f"Dataset type: {dataset_type}")
+    if demographic_vars:
+        print(f"Demographic variables (root causes only): {demographic_vars}")
     
     edge_counts = defaultdict(int)
     edge_types = {}  # Track whether each edge is directed or undirected
@@ -202,8 +452,9 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
             continue
         
         try:
-            # Create background knowledge with temporal direction
-            bk = create_background_knowledge(feature_names, base_vars, dataset_type=dataset_type)
+            # Create background knowledge with temporal direction and demographic constraints
+            bk = create_background_knowledge(feature_names, base_vars, demographic_vars, 
+                                            dataset_type=dataset_type)
             
             # Run PC algorithm
             with open(os.devnull, 'w') as devnull:
@@ -230,7 +481,7 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
             
             # Helper function to check if variable is wearable
             def is_wearable(var):
-                return var not in base_vars
+                return var not in base_vars and var not in demographic_vars
             
             for i_node in range(n_nodes):
                 for j_node in range(i_node + 1, n_nodes):
@@ -344,28 +595,53 @@ def bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, n_bootstrap=100, 
         'deep_dep_count': deep_dep_count,
         'anxiety_dep_count': anxiety_dep_count,
         'dataset_type': dataset_type,
-        'direction_corrections': direction_corrections
+        'direction_corrections': direction_corrections,
+        'demographic_vars': demographic_vars
     }
 
 
-def create_background_knowledge(feature_names, base_vars, dataset_type='before'):
+def create_background_knowledge(feature_names, base_vars, demographic_vars=None, 
+                               dataset_type='before'):
     """
     Create background knowledge constraints for PC algorithm.
     
     Args:
         feature_names: List of all variable names
         base_vars: List of outcome variables (depression, anxiety)
+        demographic_vars: List of demographic variables (age, sex) that can only be root causes
         dataset_type: 'before' or 'after' to enforce temporal direction, None for no temporal constraint
         
     Returns:
         BackgroundKnowledge object with constraints
     """
+    if demographic_vars is None:
+        demographic_vars = []
+    
     bk = BackgroundKnowledge()
     nodes = [GraphNode(name) for name in feature_names]
     name_to_node = {n.get_name(): n for n in nodes}
     
+    # ========================================
+    # DEMOGRAPHIC CONSTRAINTS (ROOT CAUSES)
+    # ========================================
+    # Demographic variables can ONLY be causes, never outcomes
+    # This means: allow demo -> anything, forbid anything -> demo
+    for demo_var in demographic_vars:
+        if demo_var in name_to_node:
+            for other_var in feature_names:
+                if other_var != demo_var:
+                    # Forbid: other_var -> demo_var
+                    # This ensures demographics are never affected by anything
+                    bk.add_forbidden_by_node(name_to_node[other_var], name_to_node[demo_var])
+    
+    print(f"Added demographic constraints: {len(demographic_vars)} variables as root causes only")
+    
+    # ========================================
+    # SENSOR FEATURE CONSTRAINTS
+    # ========================================
     # Forbid mean -> std connections for same sensor
-    sensor_features = [name for name in feature_names if name not in base_vars]
+    sensor_features = [name for name in feature_names 
+                      if name not in base_vars and name not in demographic_vars]
     processed_bases = set()
     
     for feature in sensor_features:
@@ -378,6 +654,9 @@ def create_background_knowledge(feature_names, base_vars, dataset_type='before')
                 bk.add_forbidden_by_node(name_to_node[std_feature], name_to_node[feature])
                 processed_bases.add(base_name)
     
+    # ========================================
+    # TEMPORAL DIRECTION CONSTRAINTS
+    # ========================================
     # Require temporal directions based on dataset type
     outcome_vars = [name for name in feature_names if name in base_vars]
 
@@ -399,7 +678,9 @@ def create_background_knowledge(feature_names, base_vars, dataset_type='before')
 
 
 def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=0.5, alpha=0.05, 
-                          use_pid_bootstrap=True, use_first_survey=True):
+                          use_pid_bootstrap=True, use_first_survey=True, 
+                          include_demographics=True, bin_age_var=True, age_bin_size=10,
+                          race_encoding='grouped'):
     """
     Analyze a single dataset with PC algorithm.
     
@@ -411,12 +692,17 @@ def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=
         alpha: Significance level
         use_pid_bootstrap: If True, use pid-level bootstrapping
         use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
+        include_demographics: If True, include demographic variables as covariates
+        bin_age_var: If True, use binned age categories
+        age_bin_size: Size of age bins in years (default 10)
+        race_encoding: 'grouped' (4 categories) or 'detailed' (6 categories)
         
     Returns:
         Dictionary with analysis results, or None if data loading fails
     """
     # Load and prepare data
-    df = load_and_prepare_data(filepath, dataset_name)
+    df = load_and_prepare_data(filepath, dataset_name, include_demographics, 
+                               bin_age_var, age_bin_size, race_encoding)
     if df is None:
         return None
     
@@ -425,24 +711,50 @@ def analyze_single_dataset(filepath, dataset_name, n_bootstrap=100, sample_frac=
     # Infer dataset type from name or path
     dataset_type = infer_dataset_type(dataset_name)
     
+    # Identify demographic variables in the dataset (encoded versions)
+    demographic_vars = []
+    if include_demographics:
+        # Age
+        if bin_age_var and 'age_binned' in df.columns:
+            demographic_vars.append('age_binned')
+        elif 'age_continuous' in df.columns:
+            demographic_vars.append('age_continuous')
+        elif 'age' in df.columns:
+            demographic_vars.append('age')
+        
+        # Sex
+        if 'sex_encoded' in df.columns:
+            demographic_vars.append('sex_encoded')
+        elif 'sex' in df.columns:
+            demographic_vars.append('sex')
+        
+        # Race
+        if 'race_encoded' in df.columns:
+            demographic_vars.append('race_encoded')
+        
+        # Ethnicity
+        if 'ethnicity_encoded' in df.columns:
+            demographic_vars.append('ethnicity_encoded')
+    
     if use_pid_bootstrap:
         # Prepare feature names (excluding pid which we'll handle separately)
         metric_cols = [c for c in df.columns if c.endswith("_mean") or c.endswith("_std")]
-        feature_names = base_vars + metric_cols
+        feature_names = demographic_vars + base_vars + metric_cols
         feature_names = [c for c in feature_names if not c.startswith("total_")]
         
         # Run PID-level bootstrap analysis
-        results = bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, 
+        results = bootstrap_pc_analysis_by_pid(df, feature_names, base_vars, demographic_vars,
                                               n_bootstrap, sample_frac, alpha, 
                                               use_first_survey, dataset_type)
     else:
         # Prepare variables (original method)
-        feature_names, X = prepare_variables(df, keep_pid=False)
+        feature_names, X = prepare_variables(df, include_demographics, bin_age_var, keep_pid=False)
         
         # Note: Original row-level bootstrap doesn't use dataset_type
         # Would need to be added if needed
         results = bootstrap_pc_analysis(X, feature_names, base_vars, n_bootstrap, sample_frac, alpha)
         results['dataset_type'] = dataset_type
+        results['demographic_vars'] = demographic_vars
     
     return results
 
@@ -463,9 +775,12 @@ def print_results(results, dataset_name, min_frequency=0.1):
         anx_dep = results['anxiety_dep_count']
         dataset_type = results.get('dataset_type')
         corrections = results.get('direction_corrections', 0)
+        demographic_vars = results.get('demographic_vars', [])
         
         # FIXED: Print correct direction based on dataset type
         print(f"\n{dataset_name}:")
+        if demographic_vars:
+            print(f"  [Demographics included as root causes: {', '.join(demographic_vars)}]")
         if dataset_type == 'after':
             print(f"  promis_dep_sum -> rem_std: {rem_dep}/{total} ({rem_dep/total*100:.1f}%)")
             print(f"  promis_dep_sum -> deep_std: {deep_dep}/{total} ({deep_dep/total*100:.1f}%)")
@@ -498,6 +813,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     edge_counts = results['edge_counts']
     edge_types = results.get('edge_types', {})
     outcome_vars = ['promis_dep_sum', 'promis_anx_sum']
+    demographic_vars = results.get('demographic_vars', [])
     
     # Filter edges by minimum frequency
     significant_edges = {edge: count for edge, count in edge_counts.items() 
@@ -509,7 +825,8 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     
     # Helper function to check if variable is a wearable metric
     def is_wearable_var(var):
-        return var not in outcome_vars and (var.endswith('_mean') or var.endswith('_std'))
+        return var not in outcome_vars and var not in demographic_vars and \
+               (var.endswith('_mean') or var.endswith('_std'))
     
     # Helper function to check if edge should be printed based on temporal direction
     def should_print_edge(edge, edge_type, dataset_type):
@@ -558,9 +875,10 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
         print(f"\nNo edges to display{direction_msg}")
         return
     
-    # Separate outcome-directed edges from others
-    outcome_edges = []
-    other_edges = []
+    # Separate edges into categories
+    demographic_edges = []  # Edges from demographics to other variables
+    outcome_edges = []      # Edges involving outcome variables
+    other_edges = []        # Other edges
     
     for edge, count in sorted_edges:
         freq = count / total
@@ -570,20 +888,25 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
             if edge_type == 'undirected':
                 # Undirected edge
                 edge_str = f"{edge[0]} -- {edge[1]}"
+                has_demo = any(var in demographic_vars for var in edge)
                 is_outcome = any(var in outcome_vars for var in edge)
             else:
                 # Directed edge
                 from_var, to_var = edge
                 edge_str = f"{from_var} -> {to_var}"
+                has_demo = from_var in demographic_vars
                 is_outcome = to_var in outcome_vars or from_var in outcome_vars
         else:
             # Shouldn't happen, but handle gracefully
             edge_str = str(edge)
+            has_demo = False
             is_outcome = False
         
-        edge_info = (edge_str, count, freq, is_outcome)
+        edge_info = (edge_str, count, freq)
         
-        if is_outcome:
+        if has_demo:
+            demographic_edges.append(edge_info)
+        elif is_outcome:
             outcome_edges.append(edge_info)
         else:
             other_edges.append(edge_info)
@@ -595,12 +918,20 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     elif dataset_type == 'after':
         direction_note = " [Showing: Survey -> Wearable edges only]"
     
+    # Print demographic edges (if any)
+    if demographic_edges:
+        print(f"\n  {'='*70}")
+        print(f"  DEMOGRAPHIC INFLUENCES (>={min_frequency*100:.0f}%)")
+        print(f"  {'='*70}")
+        for edge_str, count, freq in demographic_edges:
+            print(f"  * {edge_str}: {count}/{total} ({freq*100:.1f}%)")
+    
     # Print edges involving outcome variables
     if outcome_edges:
         print(f"\n  {'='*70}")
         print(f"  EDGES INVOLVING DEPRESSION/ANXIETY (>={min_frequency*100:.0f}%){direction_note}")
         print(f"  {'='*70}")
-        for edge_str, count, freq, _ in outcome_edges:
+        for edge_str, count, freq in outcome_edges:
             print(f"  * {edge_str}: {count}/{total} ({freq*100:.1f}%)")
     
     # Print other edges
@@ -608,7 +939,7 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
         print(f"\n  {'='*70}")
         print(f"  OTHER EDGES (>={min_frequency*100:.0f}%){direction_note}")
         print(f"  {'='*70}")
-        for edge_str, count, freq, _ in other_edges:
+        for edge_str, count, freq in other_edges:
             print(f"    {edge_str}: {count}/{total} ({freq*100:.1f}%)")
     
     # Summary statistics
@@ -617,6 +948,8 @@ def print_all_edges(results, min_frequency=0.1, dataset_type=None):
     print(f"    Edges >={min_frequency*100:.0f}% frequency: {len(significant_edges)}")
     if dataset_type:
         print(f"    Edges displayed after temporal filtering: {len(sorted_edges)}")
+    if demographic_vars:
+        print(f"    Edges from demographics: {len(demographic_edges)}")
     print(f"    Edges involving outcomes: {len(outcome_edges)}")
     print(f"    Other edges: {len(other_edges)}")
 
@@ -655,7 +988,9 @@ def compare_temporal_results(results_dict, min_frequency=0.1):
 
 
 def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, alpha=0.05,
-                            use_pid_bootstrap=True, use_first_survey=True, min_frequency=0.1):
+                            use_pid_bootstrap=True, use_first_survey=True, min_frequency=0.1,
+                            include_demographics=True, bin_age_var=True, age_bin_size=10,
+                            race_encoding='grouped'):
     """
     Run temporal causal discovery analysis using PC algorithm on multiple datasets.
     
@@ -667,6 +1002,10 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
         use_pid_bootstrap: If True, use pid-level bootstrapping; if False, use row-level
         use_first_survey: If True (and use_pid_bootstrap=True), use only first surveys
         min_frequency: Minimum frequency threshold to display edges (default 0.1 = 10%)
+        include_demographics: If True, include demographic variables as root cause covariates
+        bin_age_var: If True, bin age into categories (e.g., 20s, 30s)
+        age_bin_size: Size of age bins in years (default 10)
+        race_encoding: 'grouped' (4 categories) or 'detailed' (6 categories) for race variable
         
     Returns:
         Dictionary mapping dataset names to analysis results
@@ -677,6 +1016,13 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
         print(f"Bootstrapping: PID-level (first survey only: {use_first_survey})")
     else:
         print("Bootstrapping: Row-level")
+    if include_demographics:
+        age_type = f"binned ({age_bin_size}-year bins)" if bin_age_var else "continuous"
+        print(f"Demographics included as root causes:")
+        print(f"  - Age: {age_type}")
+        print(f"  - Sex: binary (0=female, 1=male)")
+        print(f"  - Race: {race_encoding} encoding")
+        print(f"  - Ethnicity: binary (0=not hispanic, 1=hispanic)")
     print("="*60)
     
     results = {}
@@ -684,7 +1030,9 @@ def run_temporal_pc_analysis(dataset_paths, n_bootstrap=100, sample_frac=0.6, al
     # Analyze each dataset
     for name, path in dataset_paths.items():
         results[name] = analyze_single_dataset(path, name, n_bootstrap, sample_frac, alpha,
-                                              use_pid_bootstrap, use_first_survey)
+                                              use_pid_bootstrap, use_first_survey,
+                                              include_demographics, bin_age_var, 
+                                              age_bin_size, race_encoding)
     
     # Compare results
     compare_temporal_results(results, min_frequency=min_frequency)
@@ -702,6 +1050,8 @@ if __name__ == "__main__":
     }
     
     # Run analysis with PID-level bootstrapping on first surveys
+    # Now includes all demographic variables (age, sex, race, ethnicity) as root cause covariates
+    # Demographics can only be causes in the causal graph, never outcomes
     # min_frequency=0.1 means only show edges that appear in >=10% of iterations
     results = run_temporal_pc_analysis(
         dataset_paths,
@@ -710,5 +1060,10 @@ if __name__ == "__main__":
         alpha=0.05,
         use_pid_bootstrap=True,
         use_first_survey=True,
-        min_frequency=0.1
+        min_frequency=0.1,
+        include_demographics=True,    # Include demographic variables
+        bin_age_var=True,              # Use binned age (20s, 30s, etc.)
+        age_bin_size=10,               # 10-year bins
+        race_encoding='grouped'        # Use grouped race encoding (4 categories)
+                                       # Options: 'grouped' or 'detailed'
     )
