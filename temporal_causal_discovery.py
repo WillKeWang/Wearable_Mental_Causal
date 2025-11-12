@@ -19,6 +19,11 @@ from causallearn.utils.cit import fisherz
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.graph.GraphNode import GraphNode
 
+from joblib import Parallel, delayed
+import pickle
+from pathlib import Path
+from datetime import datetime
+
 warnings.filterwarnings('ignore')
 
 
@@ -472,21 +477,21 @@ def create_background_knowledge(feature_names, demographic_vars, sensor_vars, su
     print(f"   Found {len(sensor_bases)} sensor base names: {sorted(sensor_bases)}")
     
     # For each sensor base, forbid all edges between its mean and std variants
+    ### Updated: forbid edges within the same time window ###
     for base in sensor_bases:
-        mean_vars = [f'{base}_mean_tm1', f'{base}_mean_t']
-        std_vars = [f'{base}_std_tm1', f'{base}_std_t']
+        same_time_pairs = [
+            (f'{base}_mean_tm1', f'{base}_std_tm1'),
+            (f'{base}_mean_t', f'{base}_std_t')
+        ]
         
         # Forbid all edges between mean and std (both directions, all time combinations)
-        for mean_var in mean_vars:
-            for std_var in std_vars:
-                if mean_var in name_to_node and std_var in name_to_node:
-                    # Forbid mean -> std
-                    bk.add_forbidden_by_node(name_to_node[mean_var], name_to_node[std_var])
-                    # Forbid std -> mean
-                    bk.add_forbidden_by_node(name_to_node[std_var], name_to_node[mean_var])
-                    sensor_constraints += 2
+        for mean_var, std_var in same_time_pairs:
+            if mean_var in name_to_node and std_var in name_to_node:
+                bk.add_forbidden_by_node(name_to_node[mean_var], name_to_node[std_var])
+                bk.add_forbidden_by_node(name_to_node[std_var], name_to_node[mean_var])
+                sensor_constraints += 2
     
-    print(f"   Added {sensor_constraints} sensor mean/std constraints")
+    print(f"   Added {sensor_constraints} same-time sensor mean/std constraints")
     
     print(f"\n   TOTAL CONSTRAINTS: {temporal_constraints + demographic_constraints + sensor_constraints}")
     print("="*70)
@@ -494,9 +499,98 @@ def create_background_knowledge(feature_names, demographic_vars, sensor_vars, su
     return bk
 
 
+def run_single_iteration(i, paired_df, unique_pids, feature_names, n_pids, sample_frac, 
+                         max_samples_per_iteration, alpha, bk, verbose):
+        
+    # Sample participants
+    n_sample_pids = int(n_pids * sample_frac)
+    sampled_pids = random.sample(list(unique_pids), n_sample_pids)
+    
+    # Get data for sampled participants
+    df_bootstrap = paired_df[paired_df['pid'].isin(sampled_pids)]
+    
+    # Further subsample if max_samples_per_iteration is set
+    if max_samples_per_iteration is not None and len(df_bootstrap) > max_samples_per_iteration:
+        df_bootstrap = df_bootstrap.sample(n=max_samples_per_iteration, random_state=i)
+    
+    # Prepare data matrix
+    X_bootstrap = df_bootstrap[feature_names].to_numpy()
+    
+    if X_bootstrap.shape[0] < 10:  # Skip if too few samples
+        return None
+    
+    if verbose and i % 10 == 0:
+        print(f"\n  Iteration {i}: Running PC on {X_bootstrap.shape[0]} samples...")
+    
+    try:
+        # Run PC algorithm
+        with open(os.devnull, 'w') as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                cg = pc(
+                    data=X_bootstrap,
+                    alpha=alpha,
+                    indep_test=fisherz,
+                    stable=True,
+                    uc_rule=0,
+                    background_knowledge=bk,
+                    node_names=feature_names,
+                    verbose=False
+                )
+        
+        if cg is None or cg.G is None:
+            return None
+        
+        # Extract edges
+        graph = cg.G
+        n_nodes = len(feature_names)
+        adj_matrix = graph.graph
+        
+        iteration_edges = {}
+        
+        for i_node in range(n_nodes):
+            for j_node in range(i_node + 1, n_nodes):
+                var_i = feature_names[i_node]
+                var_j = feature_names[j_node]
+                
+                # Check if there's any edge between these nodes
+                if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
+                    i_to_j = adj_matrix[i_node, j_node]
+                    j_to_i = adj_matrix[j_node, i_node]
+                    
+                    # Determine edge structure from matrix values
+                    # -1 = tail (no arrowhead), 1 = arrowhead
+                    if i_to_j == -1 and j_to_i == 1:
+                        # Directed: i -> j
+                        edge_key = (var_i, var_j)
+                        edge_type = 'directed'
+                    elif i_to_j == 1 and j_to_i == -1:
+                        # Directed: j -> i
+                        edge_key = (var_j, var_i)
+                        edge_type = 'directed'
+                    elif i_to_j == -1 and j_to_i == -1:
+                        # Undirected: i -- j
+                        edge_key = tuple(sorted([var_i, var_j]))
+                        edge_type = 'undirected'
+                    elif i_to_j == 1 and j_to_i == 1:
+                        # Bidirected: i <-> j
+                        edge_key = tuple(sorted([var_i, var_j]))
+                        edge_type = 'bidirected'
+                    else:
+                        continue
+                    
+                    iteration_edges[edge_key] = edge_type
+        
+        return iteration_edges
+        
+    except Exception as e:
+        if verbose:
+            print(f"Error in iteration {i}: {e}")
+        return None
+
+
 def bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, sensor_vars, survey_vars,
-                          n_bootstrap=100, sample_frac=0.6, alpha=0.05, max_samples_per_iteration=None, 
-                          verbose=False):
+                          n_bootstrap=100, sample_fracs=[0.5], alpha=0.05, max_samples_per_iteration=None, 
+                          verbose=False, save="none", results_dir="causal_discovery_results_temp"):
     """
     Run bootstrap analysis with PC algorithm on paired survey data.
     
@@ -507,19 +601,30 @@ def bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, sensor_var
         sensor_vars: List of sensor variable base names
         survey_vars: List of survey variable base names
         n_bootstrap: Number of bootstrap iterations
-        sample_frac: Fraction of participants to sample in each iteration
+        sample_fracs: Fraction of participants to sample in each iteration
         alpha: Significance level for independence tests
         max_samples_per_iteration: Maximum number of data samples per iteration (for speed)
         verbose: If True, print detailed information
+        save: Choose result saving mode ("none", "per_experiment", "combined", "both")
+        results_dir: Directory for saving output files
         
     Returns:
-        Dictionary with edge counts and analysis results
+        Dictionary mapping each sampling fraction to its analysis results
     """
+
+    # Create directory for saving results
+    results_dir = Path(results_dir)
+    if save != "none":
+        results_dir.mkdir(exist_ok=True)
+
+    # Dictionary to store all experiment results
+    all_experiments = {}
+
     print("\n" + "="*70)
     print("RUNNING BOOTSTRAP PC ANALYSIS")
     print("="*70)
     print(f"Bootstrap iterations: {n_bootstrap}")
-    print(f"Sample fraction: {sample_frac}")
+    print(f"Sample fraction: {sample_fracs}")
     print(f"Alpha: {alpha}")
     
     # Get unique pids
@@ -532,109 +637,145 @@ def bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, sensor_var
     print("\nCreating background knowledge constraints (once for all iterations)...")
     bk = create_background_knowledge(feature_names, demographic_vars, sensor_vars, survey_vars)
     
-    edge_counts = defaultdict(int)
-    edge_types = {}  # Track whether each edge is directed or undirected
-    successful_iterations = 0
-    
     print("\nStarting bootstrap iterations...")
     print("(Note: Each iteration may take several minutes with 64 variables)")
-    
-    for i in tqdm(range(n_bootstrap), desc="Bootstrap iterations"):
-        # Sample participants
-        n_sample_pids = int(n_pids * sample_frac)
-        sampled_pids = random.sample(list(unique_pids), n_sample_pids)
+
+    # Run analysis for each sample fraction
+    for sample_frac in sample_fracs:
+        print(f"\n{'='*70}")
+        print(f"EXPERIMENT: sample_frac = {sample_frac}")
+        print(f"{'='*70}")
         
-        # Get data for sampled participants
-        df_bootstrap = paired_df[paired_df['pid'].isin(sampled_pids)]
-        
-        # Further subsample if max_samples_per_iteration is set
-        if max_samples_per_iteration is not None and len(df_bootstrap) > max_samples_per_iteration:
-            df_bootstrap = df_bootstrap.sample(n=max_samples_per_iteration, random_state=i)
-        
-        # Prepare data matrix
-        X_bootstrap = df_bootstrap[feature_names].to_numpy()
-        
-        if X_bootstrap.shape[0] < 10:  # Skip if too few samples
-            continue
-        
-        if verbose and i % 10 == 0:
-            print(f"\n  Iteration {i}: Running PC on {X_bootstrap.shape[0]} samples...")
-        
-        try:
-            
-            # Run PC algorithm
-            with open(os.devnull, 'w') as devnull:
-                with redirect_stdout(devnull), redirect_stderr(devnull):
-                    cg = pc(
-                        data=X_bootstrap,
-                        alpha=alpha,
-                        indep_test=fisherz,
-                        stable=True,
-                        uc_rule=0,
-                        background_knowledge=bk,
-                        node_names=feature_names,
-                        verbose=False
-                    )
-            
-            if cg is None or cg.G is None:
-                continue
-            
-            # Extract edges
-            graph = cg.G
-            n_nodes = len(feature_names)
-            adj_matrix = graph.graph
-            
-            for i_node in range(n_nodes):
-                for j_node in range(i_node + 1, n_nodes):
-                    var_i = feature_names[i_node]
-                    var_j = feature_names[j_node]
+        # Parallel execution
+        results = Parallel(n_jobs=-2, verbose=5)(
+            delayed(run_single_iteration)(
+                i, paired_df, unique_pids, feature_names, n_pids, sample_frac,
+                max_samples_per_iteration, alpha, bk, verbose
+            )
+            for i in range(n_bootstrap)
+        )
+
+        # Aggregate results
+        edge_counts = defaultdict(int)
+        edge_types = {}  # Track whether each edge is directed or undirected
+        successful_iterations = 0
+
+        for result in results:
+            if result is not None:
+                successful_iterations += 1
+                for edge_key, edge_type in result.items():
+                    edge_counts[edge_key] += 1
+                    edge_types[edge_key] = edge_type
+
+        print(f"Successful iterations: {successful_iterations}/{n_bootstrap}")
+        print(f"Unique edges found: {len(edge_counts)}")
                     
-                    # Check if there's any edge between these nodes
-                    if adj_matrix[i_node, j_node] != 0 or adj_matrix[j_node, i_node] != 0:
-                        i_to_j = adj_matrix[i_node, j_node]
-                        j_to_i = adj_matrix[j_node, i_node]
-                        
-                        # Determine edge structure from matrix values
-                        # -1 = tail (no arrowhead), 1 = arrowhead
-                        if i_to_j == -1 and j_to_i == 1:
-                            # Directed: i -> j
-                            edge_key = (var_i, var_j)
-                            edge_types[edge_key] = 'directed'
-                        elif i_to_j == 1 and j_to_i == -1:
-                            # Directed: j -> i
-                            edge_key = (var_j, var_i)
-                            edge_types[edge_key] = 'directed'
-                        elif i_to_j == -1 and j_to_i == -1:
-                            # Undirected: i -- j
-                            edge_key = tuple(sorted([var_i, var_j]))
-                            edge_types[edge_key] = 'undirected'
-                        elif i_to_j == 1 and j_to_i == 1:
-                            # Bidirected: i <-> j
-                            edge_key = tuple(sorted([var_i, var_j]))
-                            edge_types[edge_key] = 'bidirected'
-                        else:
-                            continue
-                        
-                        edge_counts[edge_key] += 1
-            
-            successful_iterations += 1
-            
-        except Exception as e:
-            if verbose:
-                print(f"Error in iteration {i}: {e}")
-            continue
-    
-    print(f"\nSuccessful iterations: {successful_iterations}/{n_bootstrap}")
-    print(f"Unique edges found: {len(edge_counts)}")
-    
-    return {
-        'edge_counts': edge_counts,
-        'edge_types': edge_types,
-        'successful_iterations': successful_iterations,
-        'demographic_vars': demographic_vars,
-        'sensor_vars': sensor_vars,
-        'survey_vars': survey_vars
-    }
+        # Save individual results (pickle)
+        experiment_results = {
+            'sample_frac': sample_frac,
+            'n_bootstrap': n_bootstrap,
+            'alpha': alpha,
+            'edge_counts': dict(edge_counts),
+            'edge_types': edge_types,
+            'successful_iterations': successful_iterations,
+            'demographic_vars': demographic_vars,
+            'sensor_vars': sensor_vars,
+            'survey_vars': survey_vars,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Save per-experiment file if requested
+        if save in ("per_experiment", "both"):
+            fname = results_dir / f"experiment_frac_{sample_frac:.2f}.pkl"
+            with open(fname, "wb") as f:
+                pickle.dump(experiment_results, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"Saved to: {fname}")
+        
+        # Add to "all_experiments" dictionary
+        all_experiments[sample_frac] = experiment_results
+
+    # Save combined results if requested
+    if save in ("combined", "both"):
+        all_results_filename = results_dir / f"all_experiments_{n_bootstrap}_iterations.pkl"
+        with open(all_results_filename, "wb") as f:
+            pickle.dump(all_experiments, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"\nAll results saved to: {all_results_filename}")
+
+
+    print(f"\n{'='*70}")
+    print("ALL EXPERIMENTS COMPLETED")
+    print(f"{'='*70}")
+    if save != "none":
+        print(f"Results saved in: {results_dir}/")
+    else:
+        print("Results not saved to disk (in-memory only).")
+
+    return all_experiments
+
+
+def convert_bootstrap_results_to_df(all_experiments, min_frequency=0):
+    """
+    Convert the output dictionary from bootstrap_pc_analysis into a tidy DataFrame.
+
+    Parameters
+    ----------
+    all_experiments : dict
+        The dictionary returned by bootstrap_pc_analysis(). 
+        Keys are sample fractions, and values are experiment results.
+    min_frequency : float, optional
+        Minimum edge frequency threshold for inclusion in the DataFrame. Default is 0.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing one row per edge with columns:
+        [sample_frac, from_var, to_var, edge_type, edge_str, freq]
+    """
+
+    plot_causal_all_sep = []
+
+    for frac, results in all_experiments.items():
+        total = results['successful_iterations']
+        edge_counts = results['edge_counts']
+        edge_types = results.get('edge_types', {})
+
+        for edge, count in edge_counts.items():
+            freq = count / total if total > 0 else 0
+            from_var, to_var, edge_type, edge_str = None, None, None, None
+
+            if isinstance(edge, tuple) and len(edge) == 2:
+                from_var, to_var = edge
+                edge_type = edge_types.get(edge, 'directed')
+                if edge_type == "directed":
+                    edge_str = f"{from_var} -> {to_var}"
+                elif edge_type == "undirected":
+                    edge_str = f"{from_var} -- {to_var}"
+                elif edge_type == "bidirected":
+                    edge_str = f"{from_var} <-> {to_var}"
+                else:
+                    edge_str = f"{from_var} -- {to_var}"  # Default
+            else:
+                edge_str = str(edge)
+
+            if freq > min_frequency:
+                plot_causal_all_sep.append({
+                    "sample_frac": frac,
+                    "from_var": from_var,
+                    "to_var": to_var,
+                    "edge_type": edge_type,
+                    "edge_str": edge_str,
+                    "freq": freq
+                })
+
+    df_causal_structure = pd.DataFrame(plot_causal_all_sep)
+
+    df_causal_structure = df_causal_structure.sort_values(
+        by=["sample_frac", "freq"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+    print(df_causal_structure)
+
+    return df_causal_structure
 
 
 def print_results(results, min_frequency=0.1):
@@ -815,11 +956,11 @@ def check_specific_edges(results, var1, var2, min_frequency=0.0):
     return found_edges
 
 
-def run_analysis(filepath, n_bootstrap=100, sample_frac=0.6, alpha=0.05,
+def run_analysis(filepath, n_bootstrap=100, sample_frac=[0.6], alpha=0.05,
                 min_frequency=0.1, max_samples_per_iteration=None,
                 min_days_gap=21, max_days_gap=35, use_first_pair_only=True,
                 include_demographics=True, bin_age_var=True, age_bin_size=10, 
-                race_encoding='grouped'):
+                race_encoding='grouped', save="none", results_dir = "causal_discovery_results_temp"):
     """
     Run complete causal discovery analysis pipeline.
     
@@ -855,10 +996,11 @@ def run_analysis(filepath, n_bootstrap=100, sample_frac=0.6, alpha=0.05,
     # Run bootstrap analysis
     results = bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, 
                                    sensor_vars, survey_vars, n_bootstrap, 
-                                   sample_frac, alpha, max_samples_per_iteration)
+                                   sample_frac, alpha, max_samples_per_iteration,
+                                   save, results_dir)
     
     # Print results
-    print_results(results, min_frequency)
+    # print_results(results, min_frequency)
     
     return results
 
@@ -887,9 +1029,9 @@ if __name__ == "__main__":
     # For full analysis with optimized speed:
     results = run_analysis(
         filepath=filepath,
-        n_bootstrap=100,
-        sample_frac=0.8,
-        max_samples_per_iteration=15500,
+        n_bootstrap=100, # Using backend LokyBackend with 23 concurrent workers, it takes ~2 min per sample_frac for n_bootstrap = 100
+        sample_frac=[0.5, 0.6, 0.7, 0.8, 0.9], # Can be more fine-grained
+        max_samples_per_iteration=None,
         alpha=0.05,
         min_frequency=0.1,
         min_days_gap=14,  # 3 weeks minimum gap
@@ -898,5 +1040,7 @@ if __name__ == "__main__":
         include_demographics=True,
         bin_age_var=True,
         age_bin_size=10,
-        race_encoding='grouped'
+        race_encoding='grouped',
+        save='both',
+        results_dir = "causal_discovery_results_temp"
     )
