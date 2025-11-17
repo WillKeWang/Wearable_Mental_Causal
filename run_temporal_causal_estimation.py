@@ -8,6 +8,8 @@ The three relationships being estimated:
 1. promis_dep_sum_t → rem_std_t
 2. awake_std_t → promis_dep_sum_t
 3. promis_dep_sum_t → awake_std_t
+
+The script first creates temporal pairs from adjacent surveys, then runs causal estimation.
 """
 
 import pandas as pd
@@ -26,43 +28,60 @@ import time
 import os
 warnings.filterwarnings('ignore')
 
+# Import temporal pairing function from causal_discovery
+from temporal_causal_discovery import (
+    load_and_encode_data,
+    create_adjacent_survey_pairs
+)
 
-def load_and_clean_temporal_data(filepath, dataset_name):
-    """Load and clean temporal dataset with _t and _tm1 variables."""
+
+def load_and_clean_temporal_data(filepath, min_days_gap=21, max_days_gap=35,
+                                  use_first_pair_only=True,
+                                  include_demographics=True,
+                                  bin_age_var=True,
+                                  age_bin_size=10,
+                                  race_encoding='grouped'):
+    """
+    Load data and create temporal pairs with _t and _tm1 suffixes.
+
+    This function:
+    1. Loads the raw survey+wearable data
+    2. Creates pairs of consecutive surveys (tm1 and t)
+    3. Returns a dataframe with temporal variables
+    """
     print(f"\n{'='*70}")
-    print(f"Loading {dataset_name}")
+    print(f"Loading and Creating Temporal Pairs")
     print(f"{'='*70}")
     print(f"File: {filepath}")
 
-    df = pd.read_csv(filepath)
-    print(f"Original shape: {df.shape}")
-    print(f"Columns: {list(df.columns)[:20]}...")  # Show first 20 columns
+    # Load and encode data
+    df = load_and_encode_data(
+        filepath,
+        include_demographics=include_demographics,
+        bin_age_var=bin_age_var,
+        age_bin_size=age_bin_size,
+        race_encoding=race_encoding
+    )
 
-    # Clean PROMIS scores (both _t and _tm1 versions if they exist)
-    df_clean = df.copy()
+    if df is None:
+        raise FileNotFoundError(f"Could not load data from {filepath}")
 
-    # Identify PROMIS columns to clean
-    promis_cols_to_clean = []
-    for col in ['promis_dep_sum_t', 'promis_dep_sum_tm1', 'promis_anx_sum_t', 'promis_anx_sum_tm1']:
-        if col in df.columns:
-            promis_cols_to_clean.append(col)
+    # Create adjacent survey pairs (this adds _tm1 and _t suffixes)
+    paired_df, feature_names, demographic_vars, sensor_vars, survey_vars = \
+        create_adjacent_survey_pairs(
+            df,
+            include_demographics=include_demographics,
+            use_binned_age=bin_age_var,
+            min_days_gap=min_days_gap,
+            max_days_gap=max_days_gap,
+            use_first_pair_only=use_first_pair_only
+        )
 
-    # Apply PROMIS score constraints
-    for col in promis_cols_to_clean:
-        df_clean = df_clean[
-            (df_clean[col] >= 4) & (df_clean[col] <= 20)
-        ]
+    print(f"\nPaired dataset shape: {paired_df.shape}")
+    print(f"Features: {len(feature_names)}")
+    print(f"Sample columns: {list(paired_df.columns)[:10]}...")
 
-    # Drop rows with any missing values
-    initial_rows = len(df_clean)
-    df_clean = df_clean.dropna(axis=0, how='any')
-    dropped_rows = initial_rows - len(df_clean)
-
-    print(f"After cleaning: {df_clean.shape}")
-    print(f"  Dropped {dropped_rows} rows due to missing values")
-    print(f"Unique participants: {df_clean['pid'].nunique()}")
-
-    return df_clean
+    return paired_df
 
 
 def create_treatment_groups(df, treatment_var, percentile_threshold=50):
@@ -508,8 +527,13 @@ def main():
     # CONFIGURATION
     # ================================================================
 
-    # Dataset path - REPLACE WITH YOUR ACTUAL DATA PATH
-    DATA_PATH = "data/temporal_causal_data.csv"  # Update this path!
+    # Dataset path
+    DATA_PATH = "data/preprocessed/full_run/4w_to_0w_before/survey_wearable_28d_before_to_0d_before_baseline_adj_full.csv"
+
+    # Temporal pairing parameters
+    MIN_DAYS_GAP = 21  # 3 weeks minimum between surveys
+    MAX_DAYS_GAP = 35  # 5 weeks maximum between surveys
+    USE_FIRST_PAIR_ONLY = True  # Use only first valid pair per participant
 
     # Number of bootstrap iterations
     N_BOOTSTRAP = 100
@@ -551,6 +575,7 @@ def main():
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  Data file: {DATA_PATH}")
+    print(f"  Temporal pairing: {MIN_DAYS_GAP}-{MAX_DAYS_GAP} days gap")
     print(f"  Bootstrap iterations: {N_BOOTSTRAP}")
     print(f"  Number of relationships: {len(relationships)}")
     print("="*70)
@@ -558,12 +583,24 @@ def main():
     # Check if data file exists
     if not os.path.exists(DATA_PATH):
         print(f"\n❌ ERROR: Data file not found: {DATA_PATH}")
-        print("\nPlease update the DATA_PATH variable to point to your temporal causal data file.")
-        print("The file should contain variables with _t and _tm1 suffixes.")
+        print("\nPlease check the path to your data file.")
         return
 
-    # Load data
-    df = load_and_clean_temporal_data(DATA_PATH, "Temporal Causal Data")
+    # Load data and create temporal pairs
+    print("\n" + "="*70)
+    print("STEP 1: LOADING DATA AND CREATING TEMPORAL PAIRS")
+    print("="*70)
+
+    df_paired = load_and_clean_temporal_data(
+        DATA_PATH,
+        min_days_gap=MIN_DAYS_GAP,
+        max_days_gap=MAX_DAYS_GAP,
+        use_first_pair_only=USE_FIRST_PAIR_ONLY,
+        include_demographics=True,
+        bin_age_var=True,
+        age_bin_size=10,
+        race_encoding='grouped'
+    )
 
     # Store all results
     all_relationship_results = {}
@@ -571,7 +608,7 @@ def main():
     # Run analysis for each relationship
     for rel_key, rel_config in relationships.items():
         results = run_single_causal_relationship(
-            df=df,
+            df=df_paired,
             exposure=rel_config['exposure'],
             outcome=rel_config['outcome'],
             adjustment_sets=rel_config['adjustment_sets'],
