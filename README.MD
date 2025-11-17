@@ -251,3 +251,24 @@ main()              # Full analysis (100 iterations)
 - **Too many edges**: Increase `min_frequency` (e.g., 0.2)
 - **Too few edges**: Decrease `min_frequency` or increase `alpha`
 - **No successful iterations**: Data too small or insufficient variance
+
+
+# Adjustment Set
+1. 
+args.exposure = "promis_dep_sum_t"
+args.outcome = "rem_std_t"
+['age_binned']
+['rmssd_std_tm1']
+['promis_anx_sum_tm1', 'promis_dep_sum_tm1']
+
+2.
+args.exposure = "awake_std_t"
+args.outcome = "promis_dep_sum_t"
+['promis_anx_sum_tm1', 'promis_dep_sum_tm1']
+['age_binned', 'awake_std_tm1', 'onset_latency_std_t', 'onset_latency_std_tm1']
+
+3.
+args.exposure = "promis_dep_sum_t"
+args.outcome = "awake_std_t"
+['promis_anx_sum_tm1', 'promis_dep_sum_tm1']
+['age_binned', 'awake_std_tm1', 'onset_latency_std_t', 'onset_latency_std_tm1']

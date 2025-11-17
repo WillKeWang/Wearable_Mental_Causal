@@ -472,7 +472,7 @@ def main():
     args.csv_path = "causal_discovery_results/all_edges_sample_frac_with_vars.csv"
     args.sample_frac = 0.8
     args.exposure = "promis_dep_sum_t"
-    args.outcome = "rem_std_t"
+    args.outcome = "awake_std_t"
     args.existence_threshold = 50
     args.direction_count_threshold = 10
     args.orientation_threshold = 0.85
