@@ -6,34 +6,37 @@
 2. **`TEMPORAL_CAUSAL_ESTIMATION_README.md`** - Detailed documentation
 3. **`QUICK_START.md`** - This file
 
-## Quick Start (3 Steps)
+## Quick Start (2 Steps)
 
-### Step 1: Prepare Your Data
+### Step 1: Check Your Data
 
-Your CSV file needs these columns:
+Your CSV file should have these columns:
 
 **Required:**
 - `pid` (participant ID)
-- `promis_dep_sum_t`, `promis_anx_sum_t` (current time)
-- `promis_dep_sum_tm1`, `promis_anx_sum_tm1` (lagged time)
-- `rem_std_t`, `awake_std_t` (current time)
-- `rmssd_std_tm1`, `awake_std_tm1`, `onset_latency_std_tm1` (lagged time)
-- `onset_latency_std_t` (current time)
-- `age_binned` (demographic)
+- `date` (survey date for creating temporal pairs)
+- `promis_dep_sum`, `promis_anx_sum` (survey variables)
+- `rem_std`, `awake_std`, `onset_latency_std`, `rmssd_std` (wearable metrics)
+- `age`, `sex`, `race`, `ethnicity_hispanic` (demographics, optional)
 
-### Step 2: Update Data Path
-
-Edit line 617 in `run_temporal_causal_estimation.py`:
-
-```python
-DATA_PATH = "path/to/your/data.csv"  # <- Change this!
+**Default path** (already configured):
+```
+data/preprocessed/full_run/4w_to_0w_before/survey_wearable_28d_before_to_0d_before_baseline_adj_full.csv
 ```
 
-### Step 3: Run
+**Note**: The script automatically creates `_t` and `_tm1` versions from consecutive surveys!
+
+### Step 2: Run
 
 ```bash
 python run_temporal_causal_estimation.py
 ```
+
+The script will:
+1. Load your data
+2. Create temporal pairs (consecutive surveys 21-35 days apart)
+3. Run causal estimation for all three relationships
+4. Generate visualizations
 
 ## What You'll Get
 
@@ -83,16 +86,23 @@ Adjustment Sets: 2 different sets tested
 ## Common Issues
 
 **"File not found"**
-→ Check your DATA_PATH
+→ Check the DATA_PATH variable (line 531)
+
+**"No valid pairs found"**
+→ Check if participants have at least 2 surveys 21-35 days apart
+→ Adjust MIN_DAYS_GAP and MAX_DAYS_GAP if needed
 
 **"Column not found"**
-→ Check your column names match exactly (with _t and _tm1 suffixes)
+→ Ensure raw data has `promis_dep_sum`, `promis_anx_sum`, wearable metrics ending in `_std`
+→ The script will automatically add `_t` and `_tm1` suffixes
 
 **Few matched pairs**
-→ Increase caliper or reduce covariates
+→ Increase caliper (e.g., 0.2 instead of 0.1)
+→ Reduce number of covariates in adjustment sets
 
 **Bootstrap failures**
 → Reduce sample_frac or check data quality
+→ Ensure sufficient matched pairs (at least 20-30)
 
 ## Next Steps
 

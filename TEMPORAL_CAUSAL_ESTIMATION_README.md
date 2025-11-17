@@ -30,40 +30,44 @@ This script (`run_temporal_causal_estimation.py`) performs causal estimation for
 
 ## Data Requirements
 
-Your dataset must be a CSV file containing:
+Your dataset must be a CSV file from the preprocessed wearable+survey data.
 
 ### Required Columns:
-- `pid`: Participant ID (for random effects grouping)
+- `pid`: Participant ID
+- `date`: Survey date (for creating temporal pairs)
 
-### Temporal Variables (with _t and _tm1 suffixes):
-- **Current time (t)**:
-  - `promis_dep_sum_t`
-  - `promis_anx_sum_t`
-  - `rem_std_t`
-  - `awake_std_t`
-  - `onset_latency_std_t`
+### Survey Variables:
+- `promis_dep_sum`: Depression score
+- `promis_anx_sum`: Anxiety score
 
-- **Lagged time (t-1)**:
-  - `promis_dep_sum_tm1`
-  - `promis_anx_sum_tm1`
-  - `rmssd_std_tm1`
-  - `awake_std_tm1`
-  - `onset_latency_std_tm1`
+### Wearable Variables (ending in _mean or _std):
+- `rem_std`: REM sleep variability
+- `awake_std`: Awake time variability
+- `onset_latency_std`: Sleep onset latency variability
+- `rmssd_std`: Heart rate variability (RMSSD)
+- Other wearable metrics
 
-- **Demographic**:
-  - `age_binned` (or other demographic variables)
+### Demographic Variables (optional but recommended):
+- `age`: Age (will be binned into categories)
+- `sex`: Sex
+- `race`: Race
+- `ethnicity_hispanic`: Hispanic ethnicity
+
+**Note**: The script automatically creates temporal pairs from consecutive surveys, adding `_t` and `_tm1` suffixes to variables.
 
 ## How to Use
 
-### 1. Update the Data Path
+### 1. Check the Data Path
 
-Open `run_temporal_causal_estimation.py` and update line 617:
+The script is already configured with the correct path:
 
 ```python
-DATA_PATH = "data/temporal_causal_data.csv"  # Update this path!
+DATA_PATH = "data/preprocessed/full_run/4w_to_0w_before/survey_wearable_28d_before_to_0d_before_baseline_adj_full.csv"
 ```
 
-Replace with your actual data file path.
+This file contains survey and wearable data from 4 weeks before to 0 weeks (survey date) before baseline.
+
+**If you need to use a different data file**, edit line 531 in `run_temporal_causal_estimation.py`.
 
 ### 2. Run the Script
 
@@ -73,14 +77,31 @@ python run_temporal_causal_estimation.py
 
 ### 3. Optional: Adjust Configuration
 
-You can modify these parameters in the script:
+You can modify these parameters in the script (around lines 534-539):
 
 ```python
+# Temporal pairing parameters
+MIN_DAYS_GAP = 21  # 3 weeks minimum between surveys
+MAX_DAYS_GAP = 35  # 5 weeks maximum between surveys
+USE_FIRST_PAIR_ONLY = True  # Use only first valid pair per participant
+
 # Number of bootstrap iterations (default: 100)
 N_BOOTSTRAP = 100
 
 # You can also modify the adjustment sets if needed
 ```
+
+### How Temporal Pairing Works
+
+The script automatically creates temporal pairs from your data:
+
+1. **Loads raw data**: Reads the CSV with variables like `promis_dep_sum`, `rem_std`, etc.
+2. **Finds consecutive surveys**: For each participant, identifies pairs of surveys 21-35 days apart
+3. **Creates temporal variables**:
+   - Variables from the earlier survey (t-1) get suffix `_tm1`
+   - Variables from the later survey (t) get suffix `_t`
+   - Example: `promis_dep_sum` → `promis_dep_sum_tm1` and `promis_dep_sum_t`
+4. **Uses first valid pair**: By default, uses only the first valid pair per participant (faster and cleaner)
 
 ## Output
 
