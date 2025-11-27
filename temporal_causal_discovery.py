@@ -656,32 +656,32 @@ def bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, sensor_var
         )
 
         # Aggregate results
-        edge_counts = defaultdict(int)
-        edge_types = {}  # Track whether each edge is directed or undirected
+        edges = defaultdict(lambda: {"directed": 0, "undirected": 0, "bidirected": 0})
         successful_iterations = 0
 
         for result in results:
-            if result is not None:
-                successful_iterations += 1
-                for edge_key, edge_type in result.items():
-                    edge_counts[edge_key] += 1
-                    edge_types[edge_key] = edge_type
+            if result is None:
+                continue
+            successful_iterations += 1
 
-        print(f"Successful iterations: {successful_iterations}/{n_bootstrap}")
-        print(f"Unique edges found: {len(edge_counts)}")
-                    
-        # Save individual results (pickle)
+            for edge_key, edge_type in result.items():
+                if edge_type == "directed":
+                    edges[edge_key]["directed"] += 1
+                elif edge_type == "undirected":
+                    edges[edge_key]["undirected"] += 1
+                elif edge_type == "bidirected":
+                    edges[edge_key]["bidirected"] += 1
+
         experiment_results = {
-            'sample_frac': sample_frac,
-            'n_bootstrap': n_bootstrap,
-            'alpha': alpha,
-            'edge_counts': dict(edge_counts),
-            'edge_types': edge_types,
-            'successful_iterations': successful_iterations,
-            'demographic_vars': demographic_vars,
-            'sensor_vars': sensor_vars,
-            'survey_vars': survey_vars,
-            'timestamp': datetime.now().isoformat()
+            "sample_frac": sample_frac,
+            "n_bootstrap": n_bootstrap,
+            "alpha": alpha,
+            "edges": {k: v for k, v in edges.items()},
+            "successful_iterations": successful_iterations,
+            "demographic_vars": demographic_vars,
+            "sensor_vars": sensor_vars,
+            "survey_vars": survey_vars,
+            "timestamp": datetime.now().isoformat()
         }
         
         # Save per-experiment file if requested
@@ -712,6 +712,73 @@ def bootstrap_pc_analysis(paired_df, feature_names, demographic_vars, sensor_var
 
     return all_experiments
 
+def save_bootstrap_edges_to_csv(results, output_path):
+    """
+    Convert aggregated bootstrap PC results into a final CSV file.
+
+    Args:
+        results: Dictionary returned from bootstrap_pc_analysis().
+                 Each entry is results[sample_frac], containing:
+                 - "edges": { (from_var, to_var): {"directed": X, "undirected": Y, "bidirected": Z} }
+                 - "successful_iterations": number of valid bootstrap iterations
+
+        output_path: Path to save the CSV file.
+
+    Returns:
+        pandas.DataFrame containing the final edge records.
+    """
+
+    rows = []
+
+    for sample_frac, exp in results.items():
+        edges = exp.get("edges", {})
+        successful_iterations = exp.get("successful_iterations", 0)
+
+        # Skip if no valid bootstrap iterations
+        if successful_iterations == 0:
+            continue
+
+        for (from_var, to_var), stats in edges.items():
+            directed_count = stats.get("directed", 0)
+            undirected_count = stats.get("undirected", 0)
+            bidirected_count = stats.get("bidirected", 0)
+
+            # Case 1: Directed edge (A -> B)
+            if directed_count > 0:
+                rows.append({
+                    "sample_frac": sample_frac,
+                    "from_var": from_var,
+                    "to_var": to_var,
+                    "edge_type": "directed",
+                    "edge_str": f"{from_var} -> {to_var}",
+                    "freq": directed_count / successful_iterations,
+                })
+
+            # Case 2: Undirected edge (A -- B)
+            if undirected_count > 0:
+                rows.append({
+                    "sample_frac": sample_frac,
+                    "from_var": from_var,
+                    "to_var": to_var,
+                    "edge_type": "undirected",
+                    "edge_str": f"{from_var} -- {to_var}",
+                    "freq": undirected_count / successful_iterations,
+                })
+
+            # Case 3: Bidirected edge (A <-> B)
+            if bidirected_count > 0:
+                rows.append({
+                    "sample_frac": sample_frac,
+                    "from_var": from_var,
+                    "to_var": to_var,
+                    "edge_type": "bidirected",
+                    "edge_str": f"{from_var} <-> {to_var}",
+                    "freq": bidirected_count / successful_iterations,
+                })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output_path, index=False)
+    return df
 
 def convert_bootstrap_results_to_df(all_experiments, min_frequency=0):
     """
@@ -1044,3 +1111,5 @@ if __name__ == "__main__":
         save='both',
         results_dir = "causal_discovery_results_temp"
     )
+
+    save_bootstrap_edges_to_csv(results, "all_edges_sample_frac_with_vars_1k_all.csv")

@@ -31,7 +31,7 @@ def extract_edge_list_from_csv(
     sample_frac,
     existence_threshold = 50,
     direction_count_threshold = 10,
-    orientation_threshold = 0.85,
+    orientation_threshold = 0.5,
 ):
     """
     Load causal discovery edge results from CSV and return a cleaned edge list.
@@ -50,48 +50,65 @@ def extract_edge_list_from_csv(
     df = pd.read_csv(csv_path)
     df_filtered = df.loc[df["sample_frac"] == sample_frac].reset_index(drop=True)
 
-    # ---------- Step 2: Build dictionary ----------
-    edge_dict = {
-        (row["from_var"], row["to_var"]): [int(round(row["freq"] * 100)), row["edge_type"]]
-        for _, row in df_filtered.iterrows()
-    }
-
-    # ---------- Step 3: Aggregate directions ----------
+    # ---------- Step 2: Aggregate frequencies for each unordered pair ----------
+    # Structure:
+    # edge_stat[(left, right)] = { "Nab": X, "Nba": Y, "Nun": Z }
     edge_stat = {}
-    for (a, b), (freq, typ) in edge_dict.items():
+
+    for _, row in df_filtered.iterrows():
+        a = row["from_var"]
+        b = row["to_var"]
+        typ = row["edge_type"]         # "directed", "undirected", "bidirected"
+        freq = int(round(row["freq"] * 100))  # convert back to percentage count
+
+        # Sort to get the unordered pair key
         key = tuple(sorted([a, b]))
         if key not in edge_stat:
             edge_stat[key] = {"Nab": 0, "Nba": 0, "Nun": 0}
 
+        # Directed case: A → B or B → A
         if typ == "directed":
+            # If (a,b) matches sorted key order, then it's A→B
             if (a, b) == key:
                 edge_stat[key]["Nab"] += freq
             else:
                 edge_stat[key]["Nba"] += freq
+
+        # Undirected case: always added to Nun
         elif typ == "undirected":
             edge_stat[key]["Nun"] += freq
 
-    # ---------- Step 4: Build edge list ----------
+        # Optional: Treat bidirected same as undirected (or keep separate if needed)
+        elif typ == "bidirected":
+            edge_stat[key]["Nun"] += freq
+
+    # ---------- Step 3: Build final edge list ----------
     edge_list = []
+
     for (left, right), stat in edge_stat.items():
-        Nab = stat["Nab"]
-        Nba = stat["Nba"]
+        Nab = stat["Nab"]  # left → right
+        Nba = stat["Nba"]  # right → left
         Nun = stat["Nun"]
         total = Nab + Nba + Nun
 
+        # Filter out weak edges
         if total < existence_threshold:
             continue
 
+        # Decide direction based on directional dominance
         if Nab > Nba:
             if Nab >= direction_count_threshold and Nab / (Nab + Nba) >= orientation_threshold:
                 edge_list.append((left, right, "->"))
             else:
                 edge_list.append((left, right, "--"))
+
         elif Nba > Nab:
-            if Nba >= direction_count_threshold and Nba / (Nba + Nab) >= orientation_threshold:
+            if Nba >= direction_count_threshold and Nba / (Nab + Nba) >= orientation_threshold:
                 edge_list.append((right, left, "->"))
             else:
                 edge_list.append((right, left, "--"))
+
+        # If fully tied or no strong evidence
         else:
             edge_list.append((left, right, "--"))
 
@@ -449,6 +466,46 @@ def common_adj_sets_from_results(results, sub_edges):
     chosen.sort(key=lambda xs: (len(xs), tuple(xs)))
     return chosen
 
+def find_directed_path(directed_edges, exposure, outcome, verbose=False):
+    """
+    Find one directed path exposure → ... → outcome.
+    Returns the path as a list of nodes, e.g. ['A','B','C','D'].
+    Returns None if no path exists.
+
+    Supports edges in (src, dst) or (src, dst, type) form.
+    """
+
+    # Build adjacency for directed edges only
+    adj = defaultdict(set)
+    for e in directed_edges:
+        if len(e) == 3:
+            src, dst, typ = e
+            if typ == '->':
+                adj[src].add(dst)
+        else:
+            src, dst = e
+            adj[src].add(dst)
+
+    # BFS queue holds (node, path_so_far)
+    dq = deque([(exposure, [exposure])])
+    visited = set([exposure])
+
+    while dq:
+        cur, path = dq.popleft()
+
+        if cur == outcome:
+            if verbose:
+                print(f"[INFO] Directed path found: {' -> '.join(path)}")
+            return path
+
+        for nxt in adj.get(cur, ()):
+            if nxt not in visited:
+                visited.add(nxt)
+                dq.append((nxt, path + [nxt]))
+
+    if verbose:
+        print(f"[INFO] No directed path exists from {exposure} to {outcome}")
+    return None
 
 ############################ ---------- main ---------- ############################
 def main():
@@ -491,10 +548,14 @@ def main():
     anc_nodes = ancestors_directed_only(edge_list, [args.exposure, args.outcome], include_self=True)
     sub_edges = filter_edges_by_nodes(edge_list, anc_nodes)
 
-    dag_edge_sets = orient_pdag_to_dag_all(sub_edges)
-    results = evaluate_all_dags(dag_edge_sets, anc_nodes, args.exposure, args.outcome)
+    path = find_directed_path(edge_list, args.exposure, args.outcome, verbose=True)
 
-    adj_sets_final = common_adj_sets_from_results(results, sub_edges)
+    if path is not None:
+        dag_edge_sets = orient_pdag_to_dag_all(sub_edges)
+        results = evaluate_all_dags(dag_edge_sets, anc_nodes, args.exposure, args.outcome)
+        adj_sets_final = common_adj_sets_from_results(results, sub_edges)
+    else:
+        print("No path from treatment to outcome. Adjustment set cannot be identified.")
 
     print("\n=== FINAL ADJUSTMENT SETS ===")
     if adj_sets_final:
@@ -521,4 +582,5 @@ def main():
         print(f"\nSaved results to {args.save_results}")
 
 if __name__ == "__main__":
+
     main()
