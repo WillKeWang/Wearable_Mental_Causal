@@ -532,7 +532,7 @@ def main():
     args.outcome = "awake_std_t"
     args.existence_threshold = 50
     args.direction_count_threshold = 10
-    args.orientation_threshold = 0.85
+    args.orientation_threshold = 0.50
     args.save_results = None
 
     ensure_dagitty_loaded()

@@ -3,7 +3,12 @@
 
 """
 Full preprocessing run on entire dataset with timing analysis.
-Runs two time windows: -6 to -2 weeks and 1 to 5 weeks.
+Runs two time windows: -4 to 0 weeks (backward) and +1 to +5 weeks (forward).
+
+Updates:
+- Removed baseline adjustment (raw values preserved)
+- Added minimum 10-day data requirement per survey window
+- Generates comprehensive data quality reports
 """
 
 import time
@@ -148,16 +153,17 @@ def run_single_configuration(config, config_name, data_overview=None):
     # Print configuration details
     print(f"Time window: {config.window_start_offset} to {config.window_end_offset} days")
     print(f"Window description: {config.window_description}")
-    print(f"Baseline adjustment: {config.baseline_enabled}")
+    print(f"Minimum days per window: {config.min_days_per_window}")
+    print(f"Baseline adjustment: DISABLED (raw values)")
     print(f"Statistics: {config.stat_functions}")
     print(f"Sample size: {'Full dataset' if config.sample_size is None else config.sample_size}")
     print(f"Output directory: {config.output_dir}")
     
     # Expected output files
     main_filename = config.generate_filename("main")
-    baseline_filename = config.generate_filename("baseline")
+    report_filename = config.generate_filename("report")
     print(f"Expected main file: {main_filename}")
-    print(f"Expected baseline file: {baseline_filename}")
+    print(f"Expected report file: {report_filename}")
     
     # Memory before processing
     memory_before = get_memory_usage()
@@ -171,7 +177,7 @@ def run_single_configuration(config, config_name, data_overview=None):
     
     try:
         # Run preprocessing
-        main_file, baseline_file = run_preprocessing(config)
+        main_file, report_file = run_preprocessing(config)
         
         # End timing
         end_time = time.time()
@@ -182,29 +188,24 @@ def run_single_configuration(config, config_name, data_overview=None):
         
         # Memory after processing
         memory_after = get_memory_usage()
-        memory_peak = max(memory_before, memory_after)  # Approximate
+        memory_peak = max(memory_before, memory_after)
         
         print(f"Processing completed at {datetime.now().strftime('%H:%M:%S')}")
         
         # Load and analyze results
         try:
             df_main = pd.read_csv(main_file)
-            df_baseline = pd.read_csv(baseline_file)
             
             main_records = len(df_main)
-            baseline_records = len(df_baseline)
             main_participants = df_main['pid'].nunique()
-            baseline_participants = df_baseline['pid'].nunique()
             
             # Get file sizes
             main_size_mb = Path(main_file).stat().st_size / (1024 * 1024)
-            baseline_size_mb = Path(baseline_file).stat().st_size / (1024 * 1024)
             
             print(f"\nRESULTS:")
             print(f"  Main dataset: {main_records:,} records, {main_participants:,} participants")
-            print(f"  Baseline dataset: {baseline_records:,} records, {baseline_participants:,} participants")
             print(f"  Main file size: {main_size_mb:.1f} MB")
-            print(f"  Baseline file size: {baseline_size_mb:.1f} MB")
+            print(f"  Quality report: {report_file}")
             
             # Calculate processing rates
             if data_overview:
@@ -214,9 +215,9 @@ def run_single_configuration(config, config_name, data_overview=None):
             
         except Exception as e:
             print(f"  Error analyzing results: {e}")
-            main_records = baseline_records = 0
-            main_participants = baseline_participants = 0
-            main_size_mb = baseline_size_mb = 0
+            main_records = 0
+            main_participants = 0
+            main_size_mb = 0
         
         print(f"\nTIMING:")
         print(f"  Wall time: {format_duration(wall_time)}")
@@ -232,8 +233,6 @@ def run_single_configuration(config, config_name, data_overview=None):
         # Memory cleanup
         if 'df_main' in locals():
             del df_main
-        if 'df_baseline' in locals():
-            del df_baseline
         gc.collect()
         
         return {
@@ -244,13 +243,10 @@ def run_single_configuration(config, config_name, data_overview=None):
             'memory_after': memory_after,
             'memory_peak': memory_peak,
             'main_records': main_records,
-            'baseline_records': baseline_records,
             'main_participants': main_participants,
-            'baseline_participants': baseline_participants,
             'main_size_mb': main_size_mb,
-            'baseline_size_mb': baseline_size_mb,
             'main_file': main_file,
-            'baseline_file': baseline_file,
+            'report_file': report_file,
             'success': True
         }
         
@@ -261,6 +257,8 @@ def run_single_configuration(config, config_name, data_overview=None):
         
         print(f"ERROR: Processing failed after {format_duration(wall_time)}")
         print(f"Error details: {e}")
+        import traceback
+        traceback.print_exc()
         
         return {
             'config_name': config_name,
@@ -270,13 +268,10 @@ def run_single_configuration(config, config_name, data_overview=None):
             'memory_after': memory_after,
             'memory_peak': memory_after,
             'main_records': 0,
-            'baseline_records': 0,
             'main_participants': 0,
-            'baseline_participants': 0,
             'main_size_mb': 0,
-            'baseline_size_mb': 0,
             'main_file': None,
-            'baseline_file': None,
+            'report_file': None,
             'success': False,
             'error': str(e)
         }
@@ -287,6 +282,10 @@ def main():
     print("FULL DATA PREPROCESSING RUN WITH TIMING")
     print("=" * 60)
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("\nKEY SETTINGS:")
+    print("  - Baseline adjustment: DISABLED (raw values preserved)")
+    print("  - Minimum days per window: 10")
+    print("  - Data quality reports: ENABLED")
     
     # Print system info
     print_system_info()
@@ -306,30 +305,18 @@ def main():
     output_base.mkdir(parents=True, exist_ok=True)
     
     # Define configurations for the two time windows
+    # NO baseline adjustment, WITH minimum 10-day requirement
     configs = [
         {
-            'name': '6w_to_2w_before',
+            'name': '4w_to_0w_before',
             'config': ProcessingConfig(
                 oura_path=oura_path,
                 survey_path=survey_path,
-                output_dir=str(output_base / "6w_to_2w_before"),
-                window_start_offset=-42,  # -6 weeks
-                window_end_offset=-14,    # -2 weeks
-                baseline_enabled=True,
-                stat_functions=["mean", "std"],  # Using simplified stats from tests
-                sample_size=None  # Full dataset
-            )
-        },
-        {
-            'name': '1w_to_5w_after',
-            'config': ProcessingConfig(
-                oura_path=oura_path,
-                survey_path=survey_path,
-                output_dir=str(output_base / "1w_to_5w_after"),
-                window_start_offset=7,    # +1 week
-                window_end_offset=35,     # +5 weeks
-                baseline_enabled=True,
-                stat_functions=["mean", "std"],  # Using simplified stats from tests
+                output_dir=str(output_base / "4w_to_0w_before_no_baseline_min10"),
+                window_start_offset=-28,  # -4 weeks
+                window_end_offset=0,      # survey date
+                min_days_per_window=10,
+                stat_functions=["mean", "std"],
                 sample_size=None  # Full dataset
             )
         }
@@ -404,8 +391,8 @@ def main():
     for result in results:
         if result['success']:
             print(f"  {result['config_name']}:")
-            print(f"    Main: {result['main_file']}")
-            print(f"    Baseline: {result['baseline_file']}")
+            print(f"    Main data: {result['main_file']}")
+            print(f"    Quality report: {result['report_file']}")
     
     # Save timing results
     results_file = output_base / f"timing_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -415,6 +402,13 @@ def main():
         print(f"\nTiming results saved to: {results_file}")
     except Exception as e:
         print(f"Error saving timing results: {e}")
+    
+    print(f"\n{'='*60}")
+    print("PROCESSING NOTES:")
+    print("  - Raw values preserved (no baseline subtraction)")
+    print("  - Survey windows with <10 days of data excluded")
+    print("  - See quality reports for missingness and distributions")
+    print(f"{'='*60}")
     
     print(f"\n🎉 Full preprocessing run completed!")
     return successful_runs == len(configs)

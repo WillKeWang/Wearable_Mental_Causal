@@ -521,7 +521,7 @@ def visualize_adjustment_set_comparison(all_results, relationship_name, output_p
 
 
 def main():
-    """Main execution function for all three causal relationships."""
+    """Main execution function for causal relationship analysis."""
 
     # ================================================================
     # CONFIGURATION
@@ -538,46 +538,56 @@ def main():
     # Number of bootstrap iterations
     N_BOOTSTRAP = 100
 
-    # Define the three causal relationships
+    # Define the causal relationship with multiple adjustment sets
     relationships = {
         'relationship_1': {
             'name': 'Depression (t) → REM Variability (t)',
             'exposure': 'promis_dep_sum_t',
             'outcome': 'rem_std_t',
             'adjustment_sets': [
-                ['age_binned'],
-                ['rmssd_std_tm1'],
-                ['promis_anx_sum_tm1', 'promis_dep_sum_tm1']
-            ]
-        },
-        'relationship_2': {
-            'name': 'Awake Variability (t) → Depression (t)',
-            'exposure': 'awake_std_t',
-            'outcome': 'promis_dep_sum_t',
-            'adjustment_sets': [
-                ['promis_anx_sum_tm1', 'promis_dep_sum_tm1'],
-                ['age_binned', 'awake_std_tm1', 'onset_latency_std_t', 'onset_latency_std_tm1']
-            ]
-        },
-        'relationship_3': {
-            'name': 'Depression (t) → Awake Variability (t)',
-            'exposure': 'promis_dep_sum_t',
-            'outcome': 'awake_std_t',
-            'adjustment_sets': [
-                ['promis_anx_sum_tm1', 'promis_dep_sum_tm1'],
-                ['age_binned', 'awake_std_tm1', 'onset_latency_std_t', 'onset_latency_std_tm1']
+                # Set 1: Demographics only
+                ['age_binned', 'sex_encoded'],
+                
+                # Set 2: Prior sleep physiology
+                ['rem_std_tm1', 'rmssd_std_tm1'],
+                
+                # Set 3: Mental health controls
+                ['promis_anx_sum_t', 'promis_anx_sum_tm1', 'promis_dep_sum_tm1'],
+                
+                # Set 4: Mental health + demographics
+                ['promis_anx_sum_tm1', 'promis_dep_sum_tm1', 'sex_encoded'],
+                
+                # Set 5: Demographics + sleep architecture
+                ['age_binned', 'deep_std_tm1', 'rem_std_tm1', 'temperature_trend_deviation_std_tm1'],
+                
+                # Set 6: Sleep + physiological variability
+                ['awake_std_tm1', 'breath_v_average_std_tm1', 'light_std_tm1', 'rmssd_std_tm1'],
+                
+                # Set 7: Comprehensive sleep architecture
+                ['age_binned', 'awake_std_tm1', 'breath_v_average_std_tm1', 'deep_std_tm1', 
+                 'light_std_tm1', 'temperature_trend_deviation_std_tm1'],
+                
+                # Set 8: Extended physiological controls
+                ['age_binned', 'breath_average_std_tm1', 'breath_v_average_std_tm1', 
+                 'deep_std_tm1', 'efficiency_std_tm1', 'light_std_tm1', 
+                 'temperature_max_std_tm1', 'temperature_trend_deviation_std_tm1'],
+                
+                # Set 9: Full physiological panel
+                ['age_binned', 'breath_v_average_std_tm1', 'deep_std_tm1', 
+                 'efficiency_std_tm1', 'light_std_tm1', 'temperature_deviation_std_tm1', 
+                 'temperature_max_std_tm1', 'temperature_trend_deviation_std_tm1']
             ]
         }
     }
 
     print("\n" + "="*70)
-    print("TEMPORAL CAUSAL ESTIMATION - THREE RELATIONSHIPS")
+    print("TEMPORAL CAUSAL ESTIMATION - Depression → REM Variability")
     print("="*70)
     print(f"\nConfiguration:")
     print(f"  Data file: {DATA_PATH}")
     print(f"  Temporal pairing: {MIN_DAYS_GAP}-{MAX_DAYS_GAP} days gap")
     print(f"  Bootstrap iterations: {N_BOOTSTRAP}")
-    print(f"  Number of relationships: {len(relationships)}")
+    print(f"  Number of adjustment sets: {len(relationships['relationship_1']['adjustment_sets'])}")
     print("="*70)
 
     # Check if data file exists
@@ -632,8 +642,21 @@ def main():
     # FINAL SUMMARY
     # ================================================================
     print("\n" + "="*70)
-    print("FINAL SUMMARY - ALL THREE RELATIONSHIPS")
+    print("FINAL SUMMARY - Depression (t) → REM Variability (t)")
     print("="*70)
+
+    # Adjustment set labels for clearer output
+    adj_set_labels = [
+        "Demographics only",
+        "Prior sleep physiology",
+        "Mental health controls",
+        "Mental health + demographics",
+        "Demographics + sleep architecture",
+        "Sleep + physiological variability",
+        "Comprehensive sleep architecture",
+        "Extended physiological controls",
+        "Full physiological panel"
+    ]
 
     for rel_key, rel_data in all_relationship_results.items():
         config = rel_data['config']
@@ -644,15 +667,18 @@ def main():
         print(f"  Outcome: {config['outcome']}")
         print(f"  Number of adjustment sets tested: {len(config['adjustment_sets'])}")
 
-        for adj_key, adj_result in results.items():
+        for i, (adj_key, adj_result) in enumerate(results.items()):
             adj_set = adj_result['adjustment_set']
             summary = adj_result['summary']
 
             set_num = adj_key.split('_')[-1]
-            print(f"\n  Adjustment Set {set_num}: {adj_set}")
-            print(f"    Coefficient: {summary['coefficient_mean']:7.4f} [{summary['coefficient_ci_lower']:6.4f}, {summary['coefficient_ci_upper']:6.4f}]")
-            print(f"    Cohen's d:   {summary['cohens_d_mean']:7.4f} [{summary['cohens_d_ci_lower']:6.4f}, {summary['cohens_d_ci_upper']:6.4f}]")
-            print(f"    p-value:     {summary['p_value_median']:.4f}")
+            label = adj_set_labels[i] if i < len(adj_set_labels) else f"Set {set_num}"
+            
+            print(f"\n  [{set_num}] {label}")
+            print(f"      Variables: {adj_set}")
+            print(f"      Coefficient: {summary['coefficient_mean']:7.4f} [{summary['coefficient_ci_lower']:6.4f}, {summary['coefficient_ci_upper']:6.4f}]")
+            print(f"      Cohen's d:   {summary['cohens_d_mean']:7.4f} [{summary['cohens_d_ci_lower']:6.4f}, {summary['cohens_d_ci_upper']:6.4f}]")
+            print(f"      p-value:     {summary['p_value_median']:.4f}")
 
     print("\n" + "="*70)
     print("✓ ANALYSIS COMPLETE!")

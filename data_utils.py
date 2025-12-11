@@ -4,6 +4,11 @@
 """
 Optimized wearable data preprocessing utilities for TemPredict dataset.
 Based on the original working logic with performance improvements.
+
+Updates:
+- Removed baseline subtraction (raw values preserved)
+- Added minimum 10-day data requirement per survey window
+- Added comprehensive data quality reporting
 """
 
 import time
@@ -13,13 +18,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from tqdm.auto import tqdm
-
-# Fast skew and RMS are no longer needed - simplified to mean/std only
 
 # Configure logging
 logging.basicConfig(
@@ -46,9 +50,8 @@ class ProcessingConfig:
     window_start_offset: int = -30  # Days since the survey date
     window_end_offset: int = 0      # Days since the survey date
     
-    # Baseline configuration
-    baseline_enabled: bool = True
-    baseline_days: int = 30
+    # Minimum data requirements
+    min_days_per_window: int = 10  # Minimum valid days required per survey window
     
     # Processing options
     sample_size: Optional[int] = None  # None for full cohort
@@ -78,8 +81,8 @@ class ProcessingConfig:
         """Validate configuration parameters."""
         if self.window_start_offset >= self.window_end_offset:
             raise ValueError("window_start_offset must be less than window_end_offset")
-        if self.baseline_days <= 0:
-            raise ValueError("baseline_days must be positive")
+        if self.min_days_per_window <= 0:
+            raise ValueError("min_days_per_window must be positive")
         if self.sample_size is not None and self.sample_size <= 0:
             raise ValueError("sample_size must be positive or None")
     
@@ -97,7 +100,6 @@ class ProcessingConfig:
     def window_description(self) -> str:
         """Get human-readable window description."""
         start_desc = f"{abs(self.window_start_offset)}d_{'before' if self.window_start_offset < 0 else 'after'}"
-        # Fix: window_end_offset=0 means "up to survey date" which is "before"
         if self.window_end_offset <= 0:
             end_desc = f"{abs(self.window_end_offset)}d_before"
         else:
@@ -106,15 +108,33 @@ class ProcessingConfig:
     
     def generate_filename(self, file_type: str) -> str:
         """Generate descriptive filename based on configuration."""
-        baseline_suffix = "_baseline_adj" if self.baseline_enabled else "_no_baseline"
         sample_suffix = f"_n{self.sample_size}" if self.sample_size else "_full"
         
         if file_type == "main":
-            return f"survey_wearable_{self.window_description}{baseline_suffix}{sample_suffix}.csv"
-        elif file_type == "baseline":
-            return f"baseline_metrics_{self.baseline_days}d{sample_suffix}.csv"
+            return f"survey_wearable_{self.window_description}_min{self.min_days_per_window}d{sample_suffix}.csv"
+        elif file_type == "report":
+            return f"data_quality_report_{self.window_description}{sample_suffix}.txt"
         else:
             raise ValueError(f"Unknown file_type: {file_type}")
+
+
+@dataclass
+class DataQualityStats:
+    """Container for data quality statistics."""
+    total_surveys: int = 0
+    surveys_with_sufficient_data: int = 0
+    surveys_excluded_insufficient_data: int = 0
+    total_participants: int = 0
+    participants_with_data: int = 0
+    
+    # Per-metric missingness tracking
+    metric_missingness: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    
+    # Per-metric distribution tracking
+    metric_distributions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    
+    # Days per window distribution
+    days_per_window: List[int] = field(default_factory=list)
 
 
 class WearablePreprocessor:
@@ -132,6 +152,12 @@ class WearablePreprocessor:
         self.dep_cols = []
         self.anx_cols = []
         
+        # Initialize quality statistics
+        self.quality_stats = DataQualityStats()
+        
+        # Raw data collection for quality report
+        self._raw_window_data = []
+        
         logger.info(f"Initialized WearablePreprocessor with config: {config}")
     
     def load_data(self) -> None:
@@ -146,7 +172,6 @@ class WearablePreprocessor:
         
         # CRITICAL FIX: Handle MultiIndex with pid and date
         if 'pid' not in self.df_oura.columns:
-            # Check if pid is in the index (could be MultiIndex)
             if hasattr(self.df_oura.index, 'names') and 'pid' in self.df_oura.index.names:
                 self.df_oura = self.df_oura.reset_index()
             elif self.df_oura.index.name == 'pid':
@@ -154,7 +179,7 @@ class WearablePreprocessor:
         
         self.df_oura["date"] = pd.to_datetime(self.df_oura["date"], utc=True)
         
-        logger.info(f"Loaded {len(self.df_oura)} Oura records (no data validation applied)")
+        logger.info(f"Loaded {len(self.df_oura)} Oura records")
         
         logger.info("Loading monthly survey data...")
         self.df_survey = (
@@ -199,55 +224,6 @@ class WearablePreprocessor:
         logger.info(f"Processing sample: {len(sample_pids)} participants")
         return sample_pids
     
-    def calculate_baseline_metrics(self, pid: str, df_oura_pid: pd.DataFrame) -> Dict[str, float]:
-        """Calculate baseline metrics for a participant using first valid 2-week window."""
-        if not self.config.baseline_enabled:
-            return {}
-        
-        # Try to find first valid 2-week window with sufficient data
-        min_days = 14  # Minimum 2 weeks
-        for start_day in range(0, min(60, len(df_oura_pid) - min_days), 7):  # Try every week for up to 60 days
-            start_date = df_oura_pid["date"].iloc[0] + pd.Timedelta(days=start_day)
-            end_date = start_date + pd.Timedelta(days=self.config.baseline_days - 1)
-            
-            baseline_data = df_oura_pid[
-                (df_oura_pid["date"] >= start_date) & 
-                (df_oura_pid["date"] <= end_date)
-            ][self.config.metric_cols]
-            
-            # Check if we have sufficient valid data (at least 10 days)
-            valid_days = baseline_data.dropna().shape[0]
-            if valid_days >= 10:
-                baseline_means = baseline_data.mean()
-                logger.info(f"PID {pid}: Found baseline period starting day {start_day} with {valid_days} valid days")
-                return {f"{c}_baseline_mean": baseline_means[c] for c in self.config.metric_cols}
-        
-        # If no valid baseline found, use all available data
-        logger.warning(f"No valid baseline period found for PID {pid}, using all available data")
-        baseline_data = df_oura_pid[self.config.metric_cols]
-        if baseline_data.dropna().shape[0] > 0:
-            baseline_means = baseline_data.mean()
-            return {f"{c}_baseline_mean": baseline_means[c] for c in self.config.metric_cols}
-        
-        # Last resort: return NaN
-        logger.warning(f"No baseline data available for PID {pid}")
-        return {f"{c}_baseline_mean": np.nan for c in self.config.metric_cols}
-    
-    def apply_baseline_adjustment(self, df_oura_pid: pd.DataFrame, baseline_means: Dict[str, float]) -> pd.DataFrame:
-        """Apply baseline adjustment to Oura data."""
-        if not self.config.baseline_enabled or not baseline_means:
-            return df_oura_pid.copy()
-        
-        df_adjusted = df_oura_pid.copy()
-        
-        # Apply baseline adjustment
-        for col in self.config.metric_cols:
-            baseline_key = f"{col}_baseline_mean"
-            if baseline_key in baseline_means and not np.isnan(baseline_means[baseline_key]):
-                df_adjusted[col] = df_adjusted[col] - baseline_means[baseline_key]
-        
-        return df_adjusted
-    
     def extract_time_window(self, df_oura_pid: pd.DataFrame, survey_date: pd.Timestamp) -> pd.DataFrame:
         """Extract wearable data for specified time window around survey date."""
         start_date = survey_date + pd.DateOffset(days=self.config.window_start_offset)
@@ -263,7 +239,6 @@ class WearablePreprocessor:
         arr = window_data.to_numpy(float, copy=False)
         
         if arr.size == 0:
-            # Return NaN for all statistics if no data
             result = {}
             for col in self.config.metric_cols:
                 for stat in self.config.stat_functions:
@@ -285,35 +260,35 @@ class WearablePreprocessor:
         
         return result
     
-    def process_participant(self, pid: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-        """Process a single participant's data."""
+    def process_participant(self, pid: str) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Process a single participant's data without baseline adjustment."""
         df_o = self.df_oura[self.df_oura["pid"] == pid].sort_values("date").copy()
         df_m = self.df_survey[self.df_survey["pid"] == pid].copy()
         
         if df_o.empty or df_m.empty:
-            return {}, []
-        
-        # Calculate baseline metrics
-        baseline_metrics = self.calculate_baseline_metrics(pid, df_o)
-        baseline_row = {"pid": pid, **baseline_metrics}
-        
-        # Apply baseline adjustment if enabled
-        if self.config.baseline_enabled:
-            # Only use data after baseline period for analysis
-            base_end = df_o["date"].iloc[0] + pd.Timedelta(days=self.config.baseline_days - 1)
-            df_o_analysis = df_o[df_o["date"] > base_end].copy()
-            df_o_analysis = self.apply_baseline_adjustment(df_o_analysis, baseline_metrics)
-        else:
-            df_o_analysis = df_o.copy()
-        
-        if df_o_analysis.empty:
-            return baseline_row, []
+            return None, []
         
         # Process each survey response
         survey_rows = []
         for _, survey_row in df_m.iterrows():
-            # Extract time window data
-            window_data = self.extract_time_window(df_o_analysis, survey_row["date"])
+            self.quality_stats.total_surveys += 1
+            
+            # Extract time window data (NO baseline adjustment - raw values)
+            window_data = self.extract_time_window(df_o, survey_row["date"])
+            
+            # Count valid days (rows with at least one non-NaN metric value)
+            valid_days = window_data.dropna(how='all').shape[0]
+            self.quality_stats.days_per_window.append(valid_days)
+            
+            # FILTER: Skip surveys with insufficient data
+            if valid_days < self.config.min_days_per_window:
+                self.quality_stats.surveys_excluded_insufficient_data += 1
+                continue
+            
+            self.quality_stats.surveys_with_sufficient_data += 1
+            
+            # Collect raw data for quality report
+            self._raw_window_data.append(window_data)
             
             # Compute statistics
             stats = self.compute_statistics(window_data)
@@ -322,6 +297,7 @@ class WearablePreprocessor:
             row_data = {
                 "pid": pid,
                 "date": survey_row["date"],
+                "valid_days": valid_days,
                 **stats
             }
             
@@ -340,7 +316,155 @@ class WearablePreprocessor:
             
             survey_rows.append(row_data)
         
-        return baseline_row, survey_rows
+        return {"pid": pid}, survey_rows
+    
+    def _compute_quality_statistics(self) -> None:
+        """Compute comprehensive data quality statistics from collected raw data."""
+        if not self._raw_window_data:
+            logger.warning("No raw data collected for quality statistics")
+            return
+        
+        # Concatenate all window data
+        all_data = pd.concat(self._raw_window_data, ignore_index=True)
+        
+        # Compute per-metric statistics
+        for col in self.config.metric_cols:
+            if col not in all_data.columns:
+                continue
+            
+            col_data = all_data[col]
+            
+            # Missingness statistics
+            total_obs = len(col_data)
+            missing_obs = col_data.isna().sum()
+            self.quality_stats.metric_missingness[col] = {
+                "total_observations": total_obs,
+                "missing_observations": missing_obs,
+                "missing_percent": (missing_obs / total_obs * 100) if total_obs > 0 else 0.0
+            }
+            
+            # Distribution statistics (on non-missing data)
+            valid_data = col_data.dropna()
+            if len(valid_data) > 0:
+                self.quality_stats.metric_distributions[col] = {
+                    "n": len(valid_data),
+                    "mean": float(valid_data.mean()),
+                    "std": float(valid_data.std()),
+                    "min": float(valid_data.min()),
+                    "p25": float(valid_data.quantile(0.25)),
+                    "median": float(valid_data.median()),
+                    "p75": float(valid_data.quantile(0.75)),
+                    "max": float(valid_data.max()),
+                    "skewness": float(valid_data.skew()),
+                    "kurtosis": float(valid_data.kurtosis())
+                }
+            else:
+                self.quality_stats.metric_distributions[col] = {
+                    "n": 0, "mean": np.nan, "std": np.nan, "min": np.nan,
+                    "p25": np.nan, "median": np.nan, "p75": np.nan, "max": np.nan,
+                    "skewness": np.nan, "kurtosis": np.nan
+                }
+    
+    def _save_quality_report(self) -> str:
+        """Generate and save comprehensive data quality report."""
+        self._compute_quality_statistics()
+        
+        report_file = self.output_dir / self.config.generate_filename("report")
+        
+        with open(report_file, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write("DATA QUALITY REPORT\n")
+            f.write("=" * 80 + "\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
+            # Configuration summary
+            f.write("-" * 80 + "\n")
+            f.write("CONFIGURATION\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Time window: {self.config.window_start_offset} to {self.config.window_end_offset} days relative to survey\n")
+            f.write(f"Window description: {self.config.window_description}\n")
+            f.write(f"Minimum days required per window: {self.config.min_days_per_window}\n")
+            f.write(f"Baseline adjustment: DISABLED (raw values preserved)\n")
+            f.write(f"Sample size: {'Full cohort' if self.config.sample_size is None else self.config.sample_size}\n\n")
+            
+            # Survey-level statistics
+            f.write("-" * 80 + "\n")
+            f.write("SURVEY-LEVEL STATISTICS\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"Total survey responses processed: {self.quality_stats.total_surveys}\n")
+            f.write(f"Surveys with sufficient data (>={self.config.min_days_per_window} days): {self.quality_stats.surveys_with_sufficient_data}\n")
+            f.write(f"Surveys excluded (insufficient data): {self.quality_stats.surveys_excluded_insufficient_data}\n")
+            if self.quality_stats.total_surveys > 0:
+                retention_rate = self.quality_stats.surveys_with_sufficient_data / self.quality_stats.total_surveys * 100
+                f.write(f"Retention rate: {retention_rate:.1f}%\n")
+            f.write(f"Total participants: {self.quality_stats.total_participants}\n")
+            f.write(f"Participants with at least one valid survey: {self.quality_stats.participants_with_data}\n\n")
+            
+            # Days per window distribution
+            f.write("-" * 80 + "\n")
+            f.write("DAYS PER WINDOW DISTRIBUTION\n")
+            f.write("-" * 80 + "\n")
+            if self.quality_stats.days_per_window:
+                days_arr = np.array(self.quality_stats.days_per_window)
+                f.write(f"N windows: {len(days_arr)}\n")
+                f.write(f"Mean days: {np.mean(days_arr):.1f}\n")
+                f.write(f"Std days: {np.std(days_arr):.1f}\n")
+                f.write(f"Min days: {np.min(days_arr)}\n")
+                f.write(f"25th percentile: {np.percentile(days_arr, 25):.0f}\n")
+                f.write(f"Median days: {np.median(days_arr):.0f}\n")
+                f.write(f"75th percentile: {np.percentile(days_arr, 75):.0f}\n")
+                f.write(f"Max days: {np.max(days_arr)}\n")
+                
+                # Histogram of days
+                f.write("\nDays distribution histogram:\n")
+                bins = [0, 5, 10, 15, 20, 25, 30, np.inf]
+                bin_labels = ["0-4", "5-9", "10-14", "15-19", "20-24", "25-29", "30+"]
+                hist, _ = np.histogram(days_arr, bins=bins)
+                for label, count in zip(bin_labels, hist):
+                    pct = count / len(days_arr) * 100
+                    bar = "#" * int(pct / 2)
+                    f.write(f"  {label:>6} days: {count:>6} ({pct:>5.1f}%) {bar}\n")
+            f.write("\n")
+            
+            # Per-metric missingness
+            f.write("-" * 80 + "\n")
+            f.write("METRIC-LEVEL MISSINGNESS\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Metric':<30} {'Total Obs':>12} {'Missing':>12} {'Missing %':>12}\n")
+            f.write("-" * 66 + "\n")
+            for metric in self.config.metric_cols:
+                if metric in self.quality_stats.metric_missingness:
+                    stats = self.quality_stats.metric_missingness[metric]
+                    f.write(f"{metric:<30} {stats['total_observations']:>12} {stats['missing_observations']:>12} {stats['missing_percent']:>11.2f}%\n")
+            f.write("\n")
+            
+            # Per-metric distributions
+            f.write("-" * 80 + "\n")
+            f.write("METRIC DISTRIBUTIONS (RAW VALUES)\n")
+            f.write("-" * 80 + "\n")
+            
+            for metric in self.config.metric_cols:
+                if metric in self.quality_stats.metric_distributions:
+                    stats = self.quality_stats.metric_distributions[metric]
+                    f.write(f"\n{metric}:\n")
+                    f.write(f"  N (valid):    {stats['n']}\n")
+                    f.write(f"  Mean:         {stats['mean']:.4f}\n")
+                    f.write(f"  Std:          {stats['std']:.4f}\n")
+                    f.write(f"  Min:          {stats['min']:.4f}\n")
+                    f.write(f"  25th pctl:    {stats['p25']:.4f}\n")
+                    f.write(f"  Median:       {stats['median']:.4f}\n")
+                    f.write(f"  75th pctl:    {stats['p75']:.4f}\n")
+                    f.write(f"  Max:          {stats['max']:.4f}\n")
+                    f.write(f"  Skewness:     {stats['skewness']:.4f}\n")
+                    f.write(f"  Kurtosis:     {stats['kurtosis']:.4f}\n")
+            
+            f.write("\n")
+            f.write("=" * 80 + "\n")
+            f.write("END OF REPORT\n")
+            f.write("=" * 80 + "\n")
+        
+        logger.info(f"Saved data quality report to {report_file}")
+        return str(report_file)
     
     def process_all(self) -> Tuple[str, str]:
         """Process all participants and save results."""
@@ -349,35 +473,33 @@ class WearablePreprocessor:
         
         # Get sample PIDs
         sample_pids = self.get_sample_pids()
+        self.quality_stats.total_participants = len(sample_pids)
         
-        # Initialize output files
+        # Initialize output file
         main_output = self.output_dir / self.config.generate_filename("main")
-        baseline_output = self.output_dir / self.config.generate_filename("baseline")
+        main_output.unlink(missing_ok=True)
         
-        # Clean existing files
-        for file_path in [main_output, baseline_output]:
-            file_path.unlink(missing_ok=True)
-        
-        baseline_rows = []
+        participants_with_data = 0
         first_row = True
         
         logger.info(f"Processing {len(sample_pids)} participants...")
+        logger.info(f"Minimum days required per survey window: {self.config.min_days_per_window}")
+        logger.info("Baseline adjustment: DISABLED (using raw values)")
         start_time = time.perf_counter()
         
         for pid in tqdm(sample_pids, desc="Processing participants"):
             try:
-                baseline_row, survey_rows = self.process_participant(pid)
-                
-                if baseline_row:
-                    baseline_rows.append(baseline_row)
+                _, survey_rows = self.process_participant(pid)
                 
                 if survey_rows:
+                    participants_with_data += 1
+                    
                     # Convert to DataFrame and save
                     df_surveys = pd.DataFrame(survey_rows)
                     
                     # Reorder columns for better readability
                     demo_cols = [c for c in df_surveys.columns if c in ("sex", "age", "gender", "race", "ethnicity_hispanic")]
-                    lead_cols = ["pid", "date"] + demo_cols + ["promis_dep_sum", "promis_anx_sum", "after_lockdown"]
+                    lead_cols = ["pid", "date", "valid_days"] + demo_cols + ["promis_dep_sum", "promis_anx_sum", "after_lockdown"]
                     stat_cols = [c for c in df_surveys.columns if any(s in c for s in self.config.stat_functions)]
                     final_cols = lead_cols + stat_cols
                     
@@ -392,58 +514,22 @@ class WearablePreprocessor:
                 logger.error(f"Error processing PID {pid}: {str(e)}")
                 continue
             
-            # Cleanup memory
             gc.collect()
         
-        # Save baseline metrics
-        if baseline_rows:
-            pd.DataFrame(baseline_rows).to_csv(baseline_output, index=False)
-            logger.info(f"Saved {len(baseline_rows)} baseline records to {baseline_output}")
+        self.quality_stats.participants_with_data = participants_with_data
         
         elapsed_time = time.perf_counter() - start_time
         logger.info(f"Processing complete in {elapsed_time:.1f}s")
         logger.info(f"Main output: {main_output}")
-        logger.info(f"Baseline output: {baseline_output}")
         
-        # Add dataset descriptions
-        self._save_descriptions(main_output, baseline_output)
+        # Generate and save data quality report
+        report_file = self._save_quality_report()
         
-        return str(main_output), str(baseline_output)
-    
-    def _save_descriptions(self, main_file: Path, baseline_file: Path) -> None:
-        """Save dataset descriptions."""
-        desc_file = self.output_dir / f"{main_file.stem}_description.txt"
+        # Clear raw data to free memory
+        self._raw_window_data = []
+        gc.collect()
         
-        with open(desc_file, 'w') as f:
-            f.write("Dataset Description\n")
-            f.write("==================\n\n")
-            f.write(f"Configuration:\n")
-            f.write(f"- Time window: {self.config.window_description}\n")
-            f.write(f"- Direction: {self.config.window_direction}\n")
-            f.write(f"- Baseline adjustment: {'Enabled' if self.config.baseline_enabled else 'Disabled'}\n")
-            if self.config.baseline_enabled:
-                f.write(f"- Baseline period: {self.config.baseline_days} days\n")
-            f.write(f"- Sample size: {'Full cohort' if self.config.sample_size is None else self.config.sample_size}\n")
-            f.write(f"- Metrics: {', '.join(self.config.metric_cols)}\n")
-            f.write(f"- Statistics: {', '.join(self.config.stat_functions)}\n\n")
-            
-            f.write(f"Output files:\n")
-            f.write(f"- Main dataset: {main_file.name}\n")
-            f.write(f"- Baseline metrics: {baseline_file.name}\n\n")
-            
-            f.write(f"Main dataset columns:\n")
-            f.write(f"- pid: Participant ID\n")
-            f.write(f"- date: Survey date\n")
-            f.write(f"- promis_dep_sum: PROMIS depression sum score\n")
-            f.write(f"- promis_anx_sum: PROMIS anxiety sum score\n")
-            f.write(f"- after_lockdown: Binary indicator for post-lockdown surveys\n")
-            f.write(f"- [metric]_[stat]: Statistical aggregations of wearable metrics\n")
-            
-            f.write(f"\nData processing:\n")
-            f.write(f"- No winsorization applied - original variance preserved\n")
-            f.write(f"- Baseline adjustment preserves true deviations from personal baseline\n")
-        
-        logger.info(f"Saved description to {desc_file}")
+        return str(main_output), report_file
 
 
 def run_preprocessing(config: ProcessingConfig) -> Tuple[str, str]:
@@ -456,35 +542,25 @@ def run_preprocessing(config: ProcessingConfig) -> Tuple[str, str]:
 def get_example_configs() -> Dict[str, ProcessingConfig]:
     """Get example configurations for common use cases."""
     return {
-        "backward_30d": ProcessingConfig(
-            window_start_offset=-30,
+        "backward_4w": ProcessingConfig(
+            window_start_offset=-28,  # 4 weeks before
             window_end_offset=0,
-            baseline_enabled=True
-        ),
-        "forward_30d": ProcessingConfig(
-            window_start_offset=0,
-            window_end_offset=30,
-            baseline_enabled=True
+            min_days_per_window=10
         ),
         "backward_6w_to_2w": ProcessingConfig(
             window_start_offset=-42,  # 6 weeks
             window_end_offset=-14,    # 2 weeks
-            baseline_enabled=True
+            min_days_per_window=10
         ),
         "forward_1w_to_5w": ProcessingConfig(
             window_start_offset=7,    # 1 week
             window_end_offset=35,     # 5 weeks
-            baseline_enabled=True
-        ),
-        "no_baseline": ProcessingConfig(
-            window_start_offset=-30,
-            window_end_offset=0,
-            baseline_enabled=False
+            min_days_per_window=10
         ),
         "small_sample": ProcessingConfig(
-            window_start_offset=-30,
+            window_start_offset=-28,
             window_end_offset=0,
-            baseline_enabled=True,
+            min_days_per_window=10,
             sample_size=100
         )
     }
@@ -498,5 +574,5 @@ if __name__ == "__main__":
     for name, config in configs.items():
         print(f"\n{name}:")
         print(f"  Window: {config.window_description}")
-        print(f"  Baseline: {'Yes' if config.baseline_enabled else 'No'}")
+        print(f"  Min days: {config.min_days_per_window}")
         print(f"  Output: {config.generate_filename('main')}")
