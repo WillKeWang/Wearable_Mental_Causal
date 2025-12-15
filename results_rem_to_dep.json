@@ -1,0 +1,8 @@
+{
+  "exposure": "rem_std_t",
+  "outcome": "promis_dep_sum_t",
+  "path_exists": false,
+  "path": null,
+  "adj_sets_final": [],
+  "n_dags": 0
+}

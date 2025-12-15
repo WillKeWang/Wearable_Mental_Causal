@@ -401,7 +401,7 @@ def common_adj_sets_from_results(results, sub_edges):
     return the adjustment sets that appear in all runs.
     The return value is a list of sorted lists representing common adjustment sets.
     """
-    # Convert each run’s adj_sets into a set of frozensets for intersection
+    # Convert each run's adj_sets into a set of frozensets for intersection
     per_run_sets = []
     for r in results:
         sets_i = r.get("adj_sets", [])
@@ -507,80 +507,151 @@ def find_directed_path(directed_edges, exposure, outcome, verbose=False):
         print(f"[INFO] No directed path exists from {exposure} to {outcome}")
     return None
 
-############################ ---------- main ---------- ############################
-def main():
+
+def run_adjustment_analysis(csv_path, sample_frac, exposure, outcome,
+                            existence_threshold=50,
+                            direction_count_threshold=10,
+                            orientation_threshold=0.50,
+                            save_results=None):
     """
-    parser = argparse.ArgumentParser(description="Temporal causal adjustment set finder using DAGitty")
-    parser.add_argument("--csv_path", required=True, help="Path to causal discovery CSV")
-    parser.add_argument("--sample_frac", type=float, required=True, help="Sample fraction to filter (e.g., 0.8)")
-    parser.add_argument("--exposure", required=True, help="Exposure variable name")
-    parser.add_argument("--outcome", required=True, help="Outcome variable name")
-    parser.add_argument("--existence_threshold", type=int, default=50)
-    parser.add_argument("--direction_count_threshold", type=int, default=10)
-    parser.add_argument("--orientation_threshold", type=float, default=0.85)
-    parser.add_argument("--save_results", default=None, help="Optional path to save JSON results")
-    args = parser.parse_args()
+    Run the full adjustment set analysis for a given exposure-outcome pair.
+    
+    Returns:
+        dict with keys:
+            - exposure
+            - outcome
+            - path_exists: bool
+            - path: list of nodes if path exists
+            - adj_sets_final: list of adjustment sets
+            - n_dags: number of valid DAG completions
     """
-
-    class Args:
-        pass
-
-    args = Args()
-    args.csv_path = "causal_discovery_results/all_edges_sample_frac_with_vars.csv"
-    args.sample_frac = 0.8
-    args.exposure = "promis_dep_sum_t"
-    args.outcome = "awake_std_t"
-    args.existence_threshold = 50
-    args.direction_count_threshold = 10
-    args.orientation_threshold = 0.50
-    args.save_results = None
-
-    ensure_dagitty_loaded()
-
+    print(f"\n{'='*70}")
+    print(f"ANALYZING: {exposure} -> {outcome}")
+    print(f"{'='*70}")
+    
     edge_list = extract_edge_list_from_csv(
-        csv_path=args.csv_path,
-        sample_frac=args.sample_frac,
-        existence_threshold=args.existence_threshold,
-        direction_count_threshold=args.direction_count_threshold,
-        orientation_threshold=args.orientation_threshold,
+        csv_path=csv_path,
+        sample_frac=sample_frac,
+        existence_threshold=existence_threshold,
+        direction_count_threshold=direction_count_threshold,
+        orientation_threshold=orientation_threshold,
     )
+    
+    print(f"[INFO] Extracted {len(edge_list)} edges from CSV")
 
-    anc_nodes = ancestors_directed_only(edge_list, [args.exposure, args.outcome], include_self=True)
+    anc_nodes = ancestors_directed_only(edge_list, [exposure, outcome], include_self=True)
     sub_edges = filter_edges_by_nodes(edge_list, anc_nodes)
+    
+    print(f"[INFO] Ancestor subgraph: {len(anc_nodes)} nodes, {len(sub_edges)} edges")
 
-    path = find_directed_path(edge_list, args.exposure, args.outcome, verbose=True)
+    path = find_directed_path(edge_list, exposure, outcome, verbose=True)
+
+    result = {
+        "exposure": exposure,
+        "outcome": outcome,
+        "path_exists": path is not None,
+        "path": path,
+        "adj_sets_final": [],
+        "n_dags": 0
+    }
 
     if path is not None:
         dag_edge_sets = orient_pdag_to_dag_all(sub_edges)
-        results = evaluate_all_dags(dag_edge_sets, anc_nodes, args.exposure, args.outcome)
-        adj_sets_final = common_adj_sets_from_results(results, sub_edges)
+        result["n_dags"] = len(dag_edge_sets)
+        
+        if dag_edge_sets:
+            results = evaluate_all_dags(dag_edge_sets, anc_nodes, exposure, outcome)
+            adj_sets_final = common_adj_sets_from_results(results, sub_edges)
+            result["adj_sets_final"] = adj_sets_final
+        else:
+            print("[WARN] No valid DAG completions found.")
     else:
-        print("No path from treatment to outcome. Adjustment set cannot be identified.")
+        print("[INFO] No directed path from exposure to outcome. Adjustment set cannot be identified.")
 
-    print("\n=== FINAL ADJUSTMENT SETS ===")
-    if adj_sets_final:
-        for s in adj_sets_final:
-            print(s)
+    print(f"\n=== RESULTS FOR {exposure} -> {outcome} ===")
+    print(f"Path exists: {result['path_exists']}")
+    if result['path']:
+        print(f"Path: {' -> '.join(result['path'])}")
+    print(f"Number of valid DAGs: {result['n_dags']}")
+    print(f"Adjustment sets found: {len(result['adj_sets_final'])}")
+    if result['adj_sets_final']:
+        for s in result['adj_sets_final']:
+            print(f"  {s}")
     else:
-        print("No common or fallback adjustment set found.")
+        print("  No adjustment sets found.")
 
-    if args.save_results:
-        out = {
-            "adj_sets_final": adj_sets_final,
-            "results_summary": [
-                {
-                    "idx": r["idx"],
-                    "edges": r["edges"],
-                    "min_size": r["min_size"],
-                    "has_sets": r["has_sets"]
-                }
-                for r in results
-            ]
+    if save_results:
+        with open(save_results, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved results to {save_results}")
+
+    return result
+
+
+############################ ---------- main ---------- ############################
+def main():
+    ensure_dagitty_loaded()
+
+    # Configuration
+    csv_path = "data/preprocessed/full_run/4w_to_0w_before_no_baseline_min10/results/all_edges_sample_frac_with_vars_1k_all_no_sub.csv"
+    sample_frac = 0.85
+    existence_threshold = 50
+    direction_count_threshold = 10
+    orientation_threshold = 0.50
+
+    # Define the two causal directions to analyze
+    analyses = [
+        {
+            "exposure": "promis_dep_sum_t",
+            "outcome": "rem_std_t",
+            "save_results": "results_dep_to_rem.json"
+        },
+        {
+            "exposure": "rem_std_t",
+            "outcome": "promis_dep_sum_t",
+            "save_results": "results_rem_to_dep.json"
         }
-        with open(args.save_results, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
-        print(f"\nSaved results to {args.save_results}")
+    ]
+
+    all_results = []
+
+    for analysis in analyses:
+        result = run_adjustment_analysis(
+            csv_path=csv_path,
+            sample_frac=sample_frac,
+            exposure=analysis["exposure"],
+            outcome=analysis["outcome"],
+            existence_threshold=existence_threshold,
+            direction_count_threshold=direction_count_threshold,
+            orientation_threshold=orientation_threshold,
+            save_results=analysis["save_results"]
+        )
+        all_results.append(result)
+
+    # Print summary
+    print("\n" + "="*70)
+    print("SUMMARY OF BOTH DIRECTIONS")
+    print("="*70)
+    
+    for r in all_results:
+        direction = f"{r['exposure']} -> {r['outcome']}"
+        path_status = "YES" if r['path_exists'] else "NO"
+        n_adj = len(r['adj_sets_final'])
+        
+        print(f"\n{direction}")
+        print(f"  Directed path exists: {path_status}")
+        print(f"  Number of valid DAGs: {r['n_dags']}")
+        print(f"  Adjustment sets: {n_adj}")
+        if r['adj_sets_final']:
+            for s in r['adj_sets_final']:
+                print(f"    -> {s if s else '(empty set)'}")
+
+    # Save combined results
+    combined_output = "results_bidirectional_analysis.json"
+    with open(combined_output, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, ensure_ascii=False, indent=2)
+    print(f"\nCombined results saved to {combined_output}")
+
 
 if __name__ == "__main__":
-
     main()
